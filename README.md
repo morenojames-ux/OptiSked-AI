@@ -43,6 +43,11 @@ When a course has a laboratory, exactly one pattern is chosen:
 The existing Program Head, Teacher, and Student portals, attendance, leave, and
 code-generation workflows continue to work on published schedules.
 
+Generation only schedules **new** course offerings: any course that already has
+published sessions for a section is skipped, so re-running the generator never
+duplicates a course's weekly meetings. Drafts are still replaced on every run;
+delete a published session to include that course in a future generation.
+
 ## Calendar Editor (drag-and-drop)
 
 The **Calendar Editor** page (program-head sidebar) shows a Google-Calendar-style
@@ -57,7 +62,22 @@ published session to a new day and time. Dragging changes only the day and time
   invalidate them.
 - Moving a **published** session asks for confirmation first.
 - The table view on the AI Schedule Generator page is still available for
-  editing the instructor or room.
+  editing the instructor or room. **Published sessions can be edited too** — a
+  confirmation is shown, and access codes refresh automatically if the
+  instructor changes (room/day/time edits leave codes unchanged).
+
+## Room configuration
+
+The **Rooms** page (program-head sidebar) is where the list of available rooms
+is managed. Rooms are added one at a time (number + type) or as a numeric range,
+and are grouped into **Computer Labs** and **Lecture Rooms**.
+
+- The room list is **shared across all programs** so double-bookings are detected
+  everywhere.
+- Lab sessions can only be placed in Computer Labs; every other session uses
+  Lecture Rooms.
+- Defaults seeded on first run: labs `201, 202, 301, 103–106`; lecture rooms
+  `203–224, 303–310`.
 
 ## Run locally
 

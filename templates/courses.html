@@ -42,6 +42,25 @@
       </div>
     </div>
 
+    </div>
+
+    <div class="subsection">
+      <h3>Available Rooms (optional)</h3>
+      <p>Leave both empty to allow any room of the correct type. Lab sessions only use Computer Labs; lectures use Lecture Rooms.</p>
+      <div class="form-grid two">
+        <label>Computer Labs
+          <select name="lab_rooms" multiple size="6">
+            {% for r in lab_rooms %}<option value="{{ r.id }}">{{ r.label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Lecture Rooms
+          <select name="lecture_rooms" multiple size="6">
+            {% for r in lecture_rooms %}<option value="{{ r.id }}">{{ r.label }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+    </div>
+
     <div class="form-actions"><button class="primary-button" type="submit"><i class="fa-solid fa-plus"></i> Add Course</button></div>
   </form>
 </section>
@@ -49,7 +68,7 @@
 <section class="card">
   <div class="section-title"><div><h2>Course Catalog</h2><p>{{ courses|length }} {{ 'course' if courses|length == 1 else 'courses' }} configured.</p></div></div>
   {% if courses %}
-  <div class="table-wrap"><table><thead><tr><th>Code</th><th>Course</th><th>Year</th><th>Sessions</th><th>Laboratory</th><th>Duration</th><th>Action</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>Code</th><th>Course</th><th>Year</th><th>Sessions</th><th>Laboratory</th><th>Duration</th><th>Available Rooms</th><th>Action</th></tr></thead><tbody>
     {% for c in courses %}
     <tr>
       <td><strong>{{ c.course_code }}</strong></td>
@@ -64,6 +83,13 @@
         {% endif %}
       </td>
       <td>{{ c.duration_hours }} h</td>
+      <td>
+        {% if c.allowed_rooms %}
+        {% for ar in c.allowed_rooms %}<span class="status plain-tag">{{ ar }}</span>{% else %}{% endfor %}
+        {% else %}
+        <span class="status plain-tag">Any correct type</span>
+        {% endif %}
+      </td>
       <td><form method="post" action="{{ url_for('delete_course', course_id=c.id) }}" onsubmit="return confirm('Remove this course?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form></td>
     </tr>
     {% endfor %}

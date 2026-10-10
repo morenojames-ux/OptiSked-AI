@@ -143,14 +143,25 @@ def _segments_for_course(course: dict) -> List[List[dict]]:
     return [[{"session_type": LAB_SESSION, "minutes": base}]]
 
 
-def expand_blocks(courses: Iterable[dict], sections: Iterable[dict]) -> List[dict]:
+def block_key(course_code: str, year_level: str, section: str) -> Tuple[str, str, str]:
+    """Identity of a course offering for one section (used to skip published ones)."""
+    return ((course_code or "").strip().upper(), year_level or "", section or "")
+
+
+def expand_blocks(courses: Iterable[dict], sections: Iterable[dict],
+                  skip_keys: Iterable[Tuple[str, str, str]] = None) -> List[dict]:
     courses = [dict(c) for c in courses]
     sections = [dict(s) for s in sections]
+    skip = set(skip_keys or [])
     blocks: List[dict] = []
 
     for course in courses:
         applicable = [s for s in sections if s.get("year_level") == course.get("year_level")]
         for section in applicable:
+            key = block_key(course.get("course_code", ""), course.get("year_level", ""),
+                            section.get("section_name", ""))
+            if key in skip:
+                continue
             for index, segments in enumerate(_segments_for_course(course)):
                 blocks.append({
                     "program": course.get("program", ""),
@@ -164,6 +175,7 @@ def expand_blocks(courses: Iterable[dict], sections: Iterable[dict]) -> List[dic
                     "segments": segments,
                     "total_minutes": sum(seg["minutes"] for seg in segments),
                     "block_index": index,
+                    "allowed_rooms": course.get("allowed_rooms", []) or [],
                 })
     return blocks
 
@@ -208,10 +220,13 @@ class PlacementContext:
 
     # -- room helpers -----------------------------------------------------
     def available_rooms(self, day: str, start: int, end: int, wanted_type: str,
-                        limit: int = 3) -> List[str]:
+                        allowed: Sequence[str] = None, limit: int = 3) -> List[str]:
         free = []
+        allowed_set = set(allowed or [])
         for room in self.rooms:
             if room_type(room) != wanted_type:
+                continue
+            if allowed_set and room not in allowed_set:
                 continue
             busy = self.room_busy.get((day, room), [])
             if any(ranges_overlap(start, end, b_start, b_end) for b_start, b_end in busy):
@@ -349,7 +364,8 @@ def _assign_segments(block: dict, context: PlacementContext, day: str,
         seg_start = cursor
         seg_end = cursor + seg["minutes"]
         wanted = session_room_type(seg["session_type"])
-        rooms = context.available_rooms(day, seg_start, seg_end, wanted)
+        allowed = block.get("allowed_rooms")
+        rooms = context.available_rooms(day, seg_start, seg_end, wanted, allowed=allowed)
         used = {s["room"] for s in chosen}
         rooms = [r for r in rooms if r not in used]
         if not rooms:
@@ -485,8 +501,13 @@ def _place_blocks(blocks: List[dict], context: PlacementContext,
 # ---------------------------------------------------------------------------
 def generate(courses: Iterable[dict], sections: Iterable[dict], instructors: Iterable[dict],
              qualifications: Iterable[dict], unavailability: Iterable[dict],
-             rooms: Sequence[str], existing_schedules: Iterable[dict]) -> dict:
+             rooms: Sequence[str], existing_schedules: Iterable[dict],
+             skip_keys: Iterable[Tuple[str, str, str]] = None) -> dict:
     """Generate a full draft schedule.
+
+    ``skip_keys`` holds ``(course_code, year_level, section)`` tuples that
+    already have published sessions, so those course offerings are left
+    untouched instead of being scheduled again.
 
     Returns ``{"rows": [...], "report": {...}, "ml": {...}}`` where ``rows`` are
     ready-to-insert ``schedules`` records (``status='Draft'``).
@@ -495,19 +516,26 @@ def generate(courses: Iterable[dict], sections: Iterable[dict], instructors: Ite
     sections = [dict(s) for s in sections]
     instructors = [dict(i) for i in instructors]
     existing_schedules = [dict(s) for s in existing_schedules]
+    skip = set(skip_keys or [])
 
-    blocks = expand_blocks(courses, sections)
-    if not blocks:
+    blocked = expand_blocks(courses, sections, skip)
+    skipped_report = _skipped_report(courses, sections, skip)
+    if not blocked:
+        message = "No courses and sections are configured yet."
+        if skip and skipped_report:
+            message = "Every configured course already has published sessions."
         return {
             "rows": [],
             "report": {
                 "total_blocks": 0,
                 "placed_blocks": 0,
                 "unplaced": [],
-                "message": "No courses and sections are configured yet.",
+                "skipped": skipped_report,
+                "message": message,
             },
             "ml": {"active": False, "training_schedules": 0, "message": "Nothing to schedule."},
         }
+    blocks = blocked
 
     context = PlacementContext(rooms, existing_schedules, instructors, qualifications, unavailability)
 
@@ -555,10 +583,32 @@ def generate(courses: Iterable[dict], sections: Iterable[dict], instructors: Ite
             "total_blocks": len(blocks),
             "placed_blocks": len(placed),
             "unplaced": unplaced_report,
+            "skipped": skipped_report,
             "message": f"Placed {len(placed)} of {len(blocks)} scheduled session group(s).",
         },
         "ml": ml_meta,
     }
+
+
+def _skipped_report(courses: Iterable[dict], sections: Iterable[dict],
+                    skip: set) -> List[dict]:
+    """Describe the course offerings that were skipped because they are published."""
+    if not skip:
+        return []
+    report: List[dict] = []
+    for course in courses:
+        applicable = [s for s in sections if s.get("year_level") == course.get("year_level")]
+        for section in applicable:
+            key = block_key(course.get("course_code", ""), course.get("year_level", ""),
+                            section.get("section_name", ""))
+            if key in skip:
+                report.append({
+                    "course_code": course.get("course_code", ""),
+                    "course_name": course.get("course_name", ""),
+                    "year_level": course.get("year_level", ""),
+                    "section": section.get("section_name", ""),
+                })
+    return report
 
 
 def _placed_to_rows(placed: List[dict]) -> List[dict]:

@@ -1,4 +1,42 @@
 
+## Changed — Published sessions are editable
+
+- The schedule table now offers **Edit on published sessions** too (previously
+  drafts only). The Program Head can change the room, instructor, day or time.
+- A confirmation is shown before saving a published session.
+- Access codes are refreshed automatically when a published session is edited;
+  room/day/time-only edits leave the codes unchanged (codes never encoded those
+  fields).
+- Validation is unchanged: edits still pass the AI hard rules (clash, room-type,
+  time window and instructor non-preferred windows).
+
+## Added — Editable Rooms configuration
+
+- New **Rooms** page in the Program Head sidebar: add a single room
+  (`number` + type) or a whole numeric **range** at once, and delete rooms.
+- Rooms are grouped into **Computer Labs** and **Lecture Rooms** and are stored
+  in a shared `rooms` table, so the AI scheduler and the draft room dropdown use
+  the configured list instead of the old hard-coded `ROOMS` tuple.
+- Seeded once with the institution defaults: labs `201, 202, 301, 103–106`;
+  lecture rooms `203–224, 303–310`.
+- The room list is global (shared across programs) so cross-program room
+  double-bookings are still detected. Rooms already referenced by existing
+  schedules remain valid and are still treated as busy.
+- Removed the unused legacy `ai_find_fixes` helper.
+
+## Fixed — Generation no longer duplicates published courses
+
+- `Generate AI Schedule` now **skips any course offering that already has
+  published sessions** for that section, so a course configured for N meetings
+  per week is not scheduled again on a later run. Previously only drafts were
+  replaced, so published meetings were duplicated on regeneration.
+- The decision is per `(course, year level, section)` and based on **published**
+  sessions only; drafts are still cleared and rebuilt on every generation.
+- The generation report and flash message now list the course offerings that
+  were detected as already published and left unchanged
+  (`ai_generator.expand_blocks(..., skip_keys=...)`, `app.py ai_generate`).
+
+
 ## Added — Calendar Editor (drag-and-drop rescheduling)
 
 - New **Calendar Editor** page in the Program Head sidebar with a

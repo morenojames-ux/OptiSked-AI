@@ -323,7 +323,7 @@ td{font-size:17px!important;padding:17px 18px!important;line-height:1.5!importan
 .header-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:flex-end}
 .header-actions form{display:inline-flex;margin:0}
 .header-actions .primary-button[disabled]{opacity:.5;cursor:not-allowed}
-.config-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:0 0 24px}
+.config-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:0 0 24px}
 .config-tile{display:flex;align-items:center;gap:16px;padding:20px 22px;background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);text-decoration:none;color:var(--text);transition:transform .12s ease}
 .config-tile:hover{transform:translateY(-2px);border-color:#b9ddec}
 .config-tile i{font-size:26px;color:var(--cyan2);width:34px;text-align:center}

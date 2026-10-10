@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Rooms</h1>
+    <p>Manage the rooms the AI can assign in <strong>{{ session.get('program') }}</strong>. Lab sessions only use Computer Labs; lectures only use Lecture Rooms.</p>
+  </div>
+</div>
+
+<div class="info-banner"><i class="fa-solid fa-circle-info"></i><div><strong>How rooms are used.</strong> The room list is shared across all programs so double-bookings are detected everywhere. A course with a laboratory pattern draws only from <strong>Computer Labs</strong>; every other session draws from <strong>Lecture Rooms</strong>.</div></div>
+
+<section class="card">
+  <div class="section-title"><div><h2>Add Rooms</h2><p>Add a single room, or a whole number range in one go.</p></div></div>
+  <div class="form-grid two" style="align-items:start">
+    <form class="edit-slot-form" method="post" action="{{ url_for('rooms_page') }}">
+      <strong>Single room</strong>
+      <div class="form-grid four" style="margin-top:6px">
+        <label>Room number<input name="name" placeholder="e.g. 201"></label>
+        <label>Type<select name="room_type">{% for t in room_types %}<option value="{{ t.value }}">{{ t.label }}</option>{% endfor %}</select></label>
+      </div>
+      <div class="form-actions"><button class="primary-small" type="submit"><i class="fa-solid fa-plus"></i> Add Room</button></div>
+    </form>
+    <form class="edit-slot-form" method="post" action="{{ url_for('rooms_page') }}">
+      <strong>Range of rooms</strong>
+      <div class="form-grid four" style="margin-top:6px">
+        <label>From<input name="range_from" placeholder="203"></label>
+        <label>To<input name="range_to" placeholder="224"></label>
+        <label>Type<select name="room_type">{% for t in room_types %}<option value="{{ t.value }}">{{ t.label }}</option>{% endfor %}</select></label>
+      </div>
+      <div class="form-actions"><button class="primary-small" type="submit"><i class="fa-solid fa-layer-group"></i> Add Range</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="card year-overview">
+  <div class="section-title"><div><h2>Configured Rooms</h2><p>These rooms are available to the AI scheduler.</p></div></div>
+  {% for group in groups %}
+  <div class="year-group">
+    <div class="year-group-header"><div><h3>{{ group.label }}</h3><span>{{ group['items']|length }} {{ 'room' if group['items']|length == 1 else 'rooms' }}</span></div></div>
+    {% if group['items'] %}
+    <div class="qual-list" style="gap:9px">
+      {% for item in group['items'] %}
+      <span class="qual-pill" style="gap:10px">{{ item.name }}
+        <form method="post" action="{{ url_for('delete_room', room_id=item.id) }}" onsubmit="return confirm('Remove room {{ item.name }}?')" style="display:inline">
+          <button class="danger-icon" title="Delete" style="padding:0;background:none;border:0;cursor:pointer;color:#b42332"><i class="fa-solid fa-xmark"></i></button>
+        </form>
+      </span>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-inline">No {{ group.label }} rooms configured yet.</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}

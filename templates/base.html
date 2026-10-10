@@ -23,6 +23,7 @@
       <a class="{% if active_page == 'sections' %}active{% endif %}" href="{{ url_for('sections_page') }}"><i class="fa-solid fa-layer-group"></i><span>Sections</span></a>
       <a class="{% if active_page == 'courses' %}active{% endif %}" href="{{ url_for('courses_page') }}"><i class="fa-solid fa-book"></i><span>Courses</span></a>
       <a class="{% if active_page == 'instructors' %}active{% endif %}" href="{{ url_for('instructors_page') }}"><i class="fa-solid fa-chalkboard-user"></i><span>Instructors</span></a>
+      <a class="{% if active_page == 'rooms' %}active{% endif %}" href="{{ url_for('rooms_page') }}"><i class="fa-solid fa-door-open"></i><span>Rooms</span></a>
       <a class="{% if active_page == 'code_generation' %}active{% endif %}" href="{{ url_for('code_generation') }}"><i class="fa-solid fa-key"></i><span>Code Generation</span></a>
       <a class="{% if active_page == 'attendance' %}active{% endif %}" href="{{ url_for('attendance_records') }}"><i class="fa-solid fa-clipboard-user"></i><span>Attendance Records</span></a>
       {% elif session.get('role') == 'teacher' %}

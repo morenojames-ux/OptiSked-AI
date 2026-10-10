@@ -29,13 +29,14 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 DAY_ORDER = {d: i for i, d in enumerate(DAYS)}
-ROOMS = (
-    [f'Room {n} — Computer Lab' for n in (201, 202)] +
-    [f'Room {n} — Lecture Room' for n in range(203, 226)] +
-    ['Room 301 — Computer Lab'] +
-    [f'Room {n} — Lecture Room' for n in range(302, 308)] +
-    [f'Room {n} — Computer Lab' for n in range(103, 108)]
-)
+DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+DAY_ORDER = {d: i for i, d in enumerate(DAYS)}
+# Seed data for the editable, institution-wide room list (see TABLE rooms).
+DEFAULT_ROOM_GROUPS = {
+    'lab': [201, 202, 301, 103, 104, 105, 106],
+    'lecture': list(range(203, 225)) + list(range(303, 311)),
+}
+ROOM_TYPE_LABELS = {'lab': 'Computer Lab', 'lecture': 'Lecture Room'}
 PROGRAMS = [
     'BS Computer Science', 'BS Business Administration', 'BS Nursing',
     'BS Civil Engineering', 'BS Tourism Management', 'BS Hospitality Management',
@@ -68,6 +69,38 @@ def ensure_column(conn, table, column, definition):
     cols = {r['name'] for r in conn.execute(f'PRAGMA table_info({table})').fetchall()}
     if column not in cols:
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+
+def room_label(name, room_type):
+    """Human-readable room name; keeps the type keyword for room_type detection."""
+    return f"Room {name} — {ROOM_TYPE_LABELS.get(room_type, 'Lecture Room')}"
+
+
+def seed_default_rooms(conn):
+    """Populate the global room list with the institution defaults once."""
+    if conn.execute('SELECT COUNT(*) AS n FROM rooms').fetchone()['n']:
+        return
+    for room_type, numbers in DEFAULT_ROOM_GROUPS.items():
+        for number in numbers:
+            conn.execute('INSERT OR IGNORE INTO rooms(name,room_type) VALUES(?,?)',
+                         (str(number), room_type))
+
+
+def configured_rooms(conn):
+    """All configured room labels, plus any rooms already stored on schedules."""
+    rooms = []
+    for row in conn.execute("SELECT name,room_type FROM rooms ORDER BY rowid").fetchall():
+        label = room_label(row['name'], row['room_type'])
+        if label not in rooms:
+            rooms.append(label)
+    for row in conn.execute("SELECT DISTINCT room FROM schedules WHERE room IS NOT NULL AND room<>''").fetchall():
+        if row['room'] not in rooms:
+            rooms.append(row['room'])
+    return rooms
+
+
+def room_type_options():
+    return [{'value': k, 'label': v} for k, v in ROOM_TYPE_LABELS.items()]
 
 
 def init_db():
@@ -214,7 +247,21 @@ def init_db():
         course_code TEXT NOT NULL,
         FOREIGN KEY(instructor_id) REFERENCES instructors(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS rooms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        room_type TEXT NOT NULL CHECK(room_type IN ('lab','lecture'))
+    );
+    CREATE TABLE IF NOT EXISTS course_rooms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        room_id INTEGER NOT NULL,
+        UNIQUE(course_id, room_id),
+        FOREIGN KEY(course_id) REFERENCES courses(id) ON DELETE CASCADE,
+        FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE
+    );
     ''')
+    seed_default_rooms(conn)
     # AI schedule generator compatibility columns.
     ensure_column(conn, 'schedules', 'session_type', "TEXT DEFAULT 'Lecture'")
     ensure_column(conn, 'schedules', 'course_id', 'INTEGER')
@@ -500,100 +547,6 @@ def conflicts_for(candidate, ignore_id=None, conn=None, include_availability=Tru
     return conflicts
 
 
-def ai_find_fixes(candidate, ignore_id=None, limit=5):
-    """Generate feasible alternatives, then rank them with machine learning.
-
-    Hard scheduling constraints are always applied first. The ML model only
-    ranks candidates that already passed teacher, room, section, availability,
-    and leave validation.
-    """
-    conn = db()
-    rooms = list(ROOMS)
-    existing = [r['room'] for r in conn.execute('SELECT DISTINCT room FROM schedules WHERE room<>""').fetchall()]
-    for r in existing:
-        if r not in rooms:
-            rooms.append(r)
-
-    start = parse_minutes(candidate.get('start_time'))
-    end = parse_minutes(candidate.get('end_time'))
-    duration = max(30, end - start)
-    original_day = candidate.get('day')
-    original_start = candidate.get('start_time')
-
-    # Load current teacher profiles for ML features such as preferred days
-    # and availability.
-    teachers = [dict(r) for r in conn.execute(
-        "SELECT * FROM teachers ORDER BY id"
-    ).fetchall()]
-    historical = [dict(r) for r in conn.execute(
-        "SELECT * FROM schedules WHERE status='Published' ORDER BY id"
-    ).fetchall()]
-
-    candidates = []
-    seen = set()
-
-    # Search same day first, then other days, using 30-minute increments.
-    day_order = [candidate.get('day')] + [d for d in DAYS if d != candidate.get('day')]
-    for day in day_order:
-        for start_m in range(450, 1260 - duration + 1, 30):
-            end_m = start_m + duration
-            for room in rooms:
-                key = (day, start_m, end_m, room)
-                if key in seen:
-                    continue
-                seen.add(key)
-
-                c = dict(
-                    candidate,
-                    day=day,
-                    start_time=f'{start_m//60:02d}:{start_m%60:02d}',
-                    end_time=f'{end_m//60:02d}:{end_m%60:02d}',
-                    room=room,
-                    _original_start=original_start,
-                    _original_day=original_day,
-                )
-
-                if conflicts_for(c, ignore_id=ignore_id, conn=conn):
-                    continue
-
-                changes = []
-                if day != candidate.get('day'):
-                    changes.append(f'Move to {day}')
-                if (
-                    c['start_time'] != candidate.get('start_time')
-                    or c['end_time'] != candidate.get('end_time')
-                ):
-                    changes.append(
-                        f'Change time to {format_12hr(c["start_time"])}–{format_12hr(c["end_time"])}'
-                    )
-                if room != candidate.get('room'):
-                    changes.append(f'Use {room}')
-
-                c['title'] = ' • '.join(changes) or 'Keep current slot'
-                candidates.append(c)
-
-                # A larger internal pool gives the ML model enough choices to
-                # distinguish historically common patterns from merely valid ones.
-                if len(candidates) >= max(40, limit * 12):
-                    break
-            if len(candidates) >= max(40, limit * 12):
-                break
-        if len(candidates) >= max(40, limit * 12):
-            break
-
-    conn.close()
-
-    ranked, ml_info = train_and_rank(candidates, historical, teachers)
-    for item in ranked[:limit]:
-        # Preserve the UI wording while showing that ML participated in ranking.
-        if not item.get('reason'):
-            item['reason'] = (
-                'The slot passed all hard scheduling constraints and was ranked '
-                'using historical scheduling patterns.'
-            )
-    return ranked[:limit], ml_info
-
-
 def ai_model_status():
     """Return lightweight ML readiness information for the dashboard."""
     conn = db()
@@ -635,6 +588,14 @@ def program_config(conn, program):
     courses = [dict(r) for r in conn.execute(
         'SELECT * FROM courses WHERE program=? ORDER BY year_level,course_code',
         (program,)).fetchall()]
+    cr = {}
+    for r in conn.execute('''SELECT cr.course_id, rm.name, rm.room_type
+                             FROM course_rooms cr
+                             LEFT JOIN rooms rm ON rm.id=cr.room_id
+                             ORDER BY cr.course_id''').fetchall():
+        cr.setdefault(r['course_id'], []).append(room_label(r['name'], r['room_type']))
+    for c in courses:
+        c['allowed_rooms'] = sorted(set(cr.get(c['id'], [])))
     instructors = [dict(r) for r in conn.execute(
         'SELECT * FROM instructors WHERE program=? ORDER BY name', (program,)).fetchall()]
     return sections, courses, instructors
@@ -697,11 +658,8 @@ def load_generator_inputs(conn, program):
         unavailability = [dict(r) for r in conn.execute(
             f'SELECT * FROM instructor_unavailability WHERE instructor_id IN ({placeholders})',
             instructor_ids).fetchall()]
-    rooms = list(ROOMS)
+    rooms = configured_rooms(conn)
     existing = [dict(r) for r in conn.execute('SELECT * FROM schedules').fetchall()]
-    for r in existing:
-        if r['room'] and r['room'] not in rooms:
-            rooms.append(r['room'])
     return sections, courses, instructors, qualifications, unavailability, rooms, existing
 
 
@@ -815,7 +773,14 @@ def validate_form(f):
 
 @app.context_processor
 def globals_for_templates():
-    return {'app_name':'OptiSked AI','days':DAYS,'rooms':ROOMS,'programs':PROGRAMS,'year_levels':YEAR_LEVELS,'duration_options':DURATION_OPTIONS,'format_12hr':format_12hr}
+    rooms = []
+    if session.get('user_id'):
+        conn = db()
+        try:
+            rooms = configured_rooms(conn)
+        finally:
+            conn.close()
+    return {'app_name':'OptiSked AI','days':DAYS,'rooms':rooms,'programs':PROGRAMS,'year_levels':YEAR_LEVELS,'duration_options':DURATION_OPTIONS,'format_12hr':format_12hr}
 
 
 def login_required(view):
@@ -936,7 +901,7 @@ def instructors_page():
     if request.method == 'POST':
         user_id = request.form.get('user_id','').strip()
         teacher = conn.execute('SELECT * FROM teachers WHERE user_id=?', (user_id,)).fetchone() if user_id.isdigit() else None
-        codes = request.form.get('course_codes','')
+        codes = request.form.getlist('course_codes')
         day_from = request.form.get('day_from','').strip()
         day_to = request.form.get('day_to','').strip()
         np_start = request.form.get('np_start','').strip()
@@ -951,7 +916,14 @@ def instructors_page():
             cur = conn.execute('INSERT INTO instructors(program,name,user_id) VALUES(?,?,?)',
                                (program, name, teacher['user_id']))
             instructor_id = cur.lastrowid
-            assigned = [c.strip() for c in re.split(r'[,\n]', codes) if c.strip()]
+            assigned = []
+            for code in codes:
+                code = str(code).strip().upper()
+                if code:
+                    assigned.append(code)
+            # dedupe; only keep codes that exist in this program's courses
+            valid = {c['course_code'].strip().upper() for c in conn.execute('SELECT course_code FROM courses WHERE program=?', (program,)).fetchall()}
+            assigned = [c for c in assigned if c in valid]
             for code in assigned:
                 conn.execute('INSERT INTO instructor_qualifications(instructor_id,course_code) VALUES(?,?)',
                              (instructor_id, code))
@@ -982,6 +954,31 @@ def instructors_page():
 
 def _owns_instructor(conn, program, instructor_id):
     return conn.execute('SELECT id FROM instructors WHERE id=? AND program=?', (instructor_id, program)).fetchone()
+
+
+@app.route('/instructors/<int:instructor_id>/subjects', methods=['POST'])
+@role_required('program_head')
+def edit_instructor_subjects(instructor_id):
+    program = session.get('program','').strip()
+    conn = db()
+    if not _owns_instructor(conn, program, instructor_id):
+        conn.close(); flash('Instructor not found in your program.', 'error'); return redirect(url_for('instructors_page'))
+    codes = request.form.getlist('course_codes')
+    assigned = []
+    for code in codes:
+        code = str(code).strip().upper()
+        if code:
+            assigned.append(code)
+    valid = {c['course_code'].strip().upper() for c in conn.execute('SELECT course_code FROM courses WHERE program=?', (program,)).fetchall()}
+    assigned = [c for c in assigned if c in valid]
+    conn.execute('DELETE FROM instructor_qualifications WHERE instructor_id=?', (instructor_id,))
+    for code in assigned:
+        conn.execute('INSERT INTO instructor_qualifications(instructor_id,course_code) VALUES(?,?)',
+                     (instructor_id, code))
+    conn.commit()
+    conn.close()
+    flash('Instructor subjects updated.', 'success')
+    return redirect(url_for('instructors_page'))
 
 
 @app.route('/instructors/<int:instructor_id>/delete', methods=['POST'])
@@ -1069,17 +1066,42 @@ def courses_page():
         else:
             if not has_lab:
                 lab_pattern = ''
-            conn.execute('''INSERT INTO courses(program,course_code,course_name,year_level,sessions_per_week,has_lab,lab_pattern,duration_hours)
-                            VALUES(?,?,?,?,?,?,?,?)''',
-                         (program, course_code, course_name, year_level, sessions, has_lab, lab_pattern, float(duration)))
+            cur = conn.execute('''INSERT INTO courses(program,course_code,course_name,year_level,sessions_per_week,has_lab,lab_pattern,duration_hours)
+                                   VALUES(?,?,?,?,?,?,?,?)''',
+                                (program, course_code, course_name, year_level, sessions, has_lab, lab_pattern, float(duration)))
+            course_id = cur.lastrowid
+            # attach selected rooms
+            for rid in request.form.getlist('lab_rooms'):
+                try:
+                    conn.execute('INSERT OR IGNORE INTO course_rooms(course_id,room_id) VALUES(?,?)', (course_id,int(rid)))
+                except Exception:
+                    pass
+            for rid in request.form.getlist('lecture_rooms'):
+                try:
+                    conn.execute('INSERT OR IGNORE INTO course_rooms(course_id,room_id) VALUES(?,?)', (course_id,int(rid)))
+                except Exception:
+                    pass
             conn.commit()
             flash(f'Course {course_code} saved.', 'success')
         return redirect(url_for('courses_page'))
     courses = [dict(r) for r in conn.execute('SELECT * FROM courses WHERE program=? ORDER BY year_level,course_code', (program,)).fetchall()]
+    cr_map = {}
+    for r in conn.execute('''SELECT cr.course_id, rm.name, rm.room_type
+                             FROM course_rooms cr
+                             LEFT JOIN rooms rm ON rm.id=cr.room_id
+                             ORDER BY cr.course_id''').fetchall():
+        cr_map.setdefault(r['course_id'], []).append(room_label(r['name'], r['room_type']))
+    for c in courses:
+        c['allowed_rooms'] = sorted(set(cr_map.get(c['id'], [])))
+    lab_rooms = [dict(r, label=room_label(r['name'], r['room_type']))
+                 for r in conn.execute("SELECT * FROM rooms WHERE room_type='lab' ORDER BY CAST(name as integer), name").fetchall()]
+    lecture_rooms = [dict(r, label=room_label(r['name'], r['room_type']))
+                     for r in conn.execute("SELECT * FROM rooms WHERE room_type='lecture' ORDER BY CAST(name as integer), name").fetchall()]
     conn.close()
     return render_template('courses.html', active_page='courses', courses=courses,
                            year_levels=YEAR_LEVELS, duration_options=DURATION_OPTIONS,
-                           lab_patterns=LAB_PATTERNS)
+                           lab_patterns=LAB_PATTERNS, lab_rooms=lab_rooms,
+                           lecture_rooms=lecture_rooms)
 
 
 @app.route('/courses/<int:course_id>/delete', methods=['POST'])
@@ -1149,6 +1171,74 @@ def delete_section(section_id):
     return redirect(url_for('sections_page'))
 
 
+@app.route('/rooms', methods=['GET', 'POST'])
+@role_required('program_head')
+def rooms_page():
+    conn = db()
+    if request.method == 'POST':
+        room_type = request.form.get('room_type', 'lab').strip()
+        range_from = request.form.get('range_from', '').strip()
+        range_to = request.form.get('range_to', '').strip()
+        name = request.form.get('name', '').strip()
+        if room_type not in ROOM_TYPE_LABELS:
+            flash('Please select a valid room type.', 'error')
+        elif range_from or range_to:
+            if not (range_from.isdigit() and range_to.isdigit()):
+                flash('A range needs whole-number From and To values.', 'error')
+            else:
+                low, high = sorted((int(range_from), int(range_to)))
+                if high - low > 200:
+                    flash('Range is too large — add at most 200 rooms at once.', 'error')
+                else:
+                    added = 0
+                    for number in range(low, high + 1):
+                        added += conn.execute('INSERT OR IGNORE INTO rooms(name,room_type) VALUES(?,?)',
+                                              (str(number), room_type)).rowcount
+                    conn.commit()
+                    label = ROOM_TYPE_LABELS[room_type]
+                    if added:
+                        flash(f'Added {added} {label} room(s).', 'success')
+                    else:
+                        flash('Those rooms already exist.', 'error')
+        elif not name:
+            flash('Room number is required.', 'error')
+        else:
+            added = conn.execute('INSERT OR IGNORE INTO rooms(name,room_type) VALUES(?,?)',
+                                 (name, room_type)).rowcount
+            conn.commit()
+            if added:
+                flash(f'Room {name} added as a {ROOM_TYPE_LABELS[room_type]}.', 'success')
+            else:
+                flash(f'Room {name} already exists.', 'error')
+        conn.close()
+        return redirect(url_for('rooms_page'))
+
+    groups = []
+    for key in ('lab', 'lecture'):
+        rows = [dict(r, label=room_label(r['name'], r['room_type']))
+                for r in conn.execute('SELECT * FROM rooms WHERE room_type=?', (key,)).fetchall()]
+        rows.sort(key=lambda r: (0, int(r['name'])) if str(r['name']).isdigit() else (1, str(r['name'])))
+        groups.append({'key': key, 'label': ROOM_TYPE_LABELS[key], 'items': rows})
+    conn.close()
+    return render_template('rooms.html', active_page='rooms', groups=groups,
+                           room_types=room_type_options())
+
+
+@app.route('/rooms/<int:room_id>/delete', methods=['POST'])
+@role_required('program_head')
+def delete_room(room_id):
+    conn = db()
+    row = conn.execute('SELECT * FROM rooms WHERE id=?', (room_id,)).fetchone()
+    if row:
+        conn.execute('DELETE FROM rooms WHERE id=?', (room_id,))
+        conn.commit()
+        flash(f"Room {row['name']} removed.", 'success')
+    else:
+        flash('Room not found.', 'error')
+    conn.close()
+    return redirect(url_for('rooms_page'))
+
+
 @app.route('/ai/generate', methods=['POST'])
 @role_required('program_head')
 def ai_generate():
@@ -1162,7 +1252,14 @@ def ai_generate():
         flash('Add at least one course and one section before generating a schedule.', 'error')
         return redirect(url_for('dashboard'))
 
-    result = ai_generator.generate(courses, sections, instructors, qualifications, unavailability, rooms, existing)
+    # Courses that already have published sessions must not be scheduled again.
+    covered = {
+        ((r.get('subject_code') or '').strip().upper(), r.get('year_level', ''), r.get('section', ''))
+        for r in existing
+        if (r.get('status') or '') == 'Published'
+    }
+    result = ai_generator.generate(courses, sections, instructors, qualifications,
+                                   unavailability, rooms, existing, skip_keys=covered)
 
     # Replace any previous draft for this program with the fresh AI output.
     conn.execute("DELETE FROM schedules WHERE program=? AND status='Draft'", (program,))
@@ -1189,7 +1286,9 @@ def ai_generate():
     report = dict(result['report'])
     report['ml'] = result['ml']
     session['generation_report'] = report
-    flash(f"AI generated {len(result['rows'])} draft session(s). {result['report']['message']}", 'success')
+    skipped = report.get('skipped') or []
+    note = f" {len(skipped)} course offering(s) already published and left unchanged." if skipped else ""
+    flash(f"AI generated {len(result['rows'])} draft session(s). {result['report']['message']}{note}", 'success')
     return redirect(url_for('dashboard'))
 
 
@@ -1244,8 +1343,6 @@ def edit_generated_schedule(schedule_id):
     row = conn.execute('SELECT * FROM schedules WHERE id=? AND program=?', (schedule_id, program)).fetchone()
     if not row:
         conn.close(); flash('Schedule not found in your program.', 'error'); return redirect(url_for('dashboard'))
-    if row['status'] == 'Published':
-        conn.close(); flash('Published schedules cannot be edited here.', 'error'); return redirect(url_for('dashboard'))
 
     day = request.form.get('day', row['day']).strip()
     start_time = request.form.get('start_time', row['start_time']).strip()
@@ -1270,9 +1367,13 @@ def edit_generated_schedule(schedule_id):
 
     conn.execute('UPDATE schedules SET day=?,start_time=?,end_time=?,room=?,teacher_name=? WHERE id=?',
                  (day, start_time, end_time, room, teacher_name, schedule_id))
+    # Published sessions keep their access codes valid; refresh them so a changed
+    # instructor is reflected (room/day/time edits leave the codes untouched).
+    if row['status'] == 'Published':
+        sync_codes(schedule_id, conn)
     conn.commit()
     conn.close()
-    flash('Draft session updated.', 'success')
+    flash(f"{'Published' if row['status'] == 'Published' else 'Draft'} session updated.", 'success')
     return redirect(url_for('dashboard'))
 
 

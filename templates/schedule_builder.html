@@ -34,6 +34,10 @@
     <i class="fa-solid fa-chalkboard-user"></i>
     <div><strong>{{ instructors|length }}</strong><span>Instructors</span></div>
   </a>
+  <a class="config-tile" href="{{ url_for('rooms_page') }}">
+    <i class="fa-solid fa-door-open"></i>
+    <div><strong>{{ rooms|length }}</strong><span>Rooms</span></div>
+  </a>
 </section>
 
 {% if not sections or not courses or not instructors %}
@@ -78,11 +82,14 @@
   {% else %}
   <div class="suggestion"><div><strong>All sessions placed successfully.</strong><small>Review the drafts below, edit if needed, then publish.</small></div></div>
   {% endif %}
+  {% if report.skipped %}
+  <div class="suggestion"><div><strong>Already published — left unchanged</strong><small>{{ report.skipped|length }} course offering(s): {% for u in report.skipped %}{{ u.course_code }} ({{ u.year_level }} · Section {{ u.section }}){{ ', ' if not loop.last }}{% endfor %}. Delete a published session to include it in a future generation.</small></div></div>
+  {% endif %}
 </div>
 {% endif %}
 
 <section class="card year-overview">
-  <div class="section-title"><div><h2>Schedule</h2><p>Draft sessions can be edited or published. Published sessions are final and generate access codes.</p></div></div>
+  <div class="section-title"><div><h2>Schedule</h2><p>Draft sessions can be edited or published. Published sessions can still be edited (e.g. change the room) — a confirmation is shown and access codes refresh automatically if the instructor changes.</p></div></div>
   {% set has_any = [] %}
   {% for group in year_groups %}{% if group['items'] %}{% set _ = has_any.append(1) %}{% endif %}{% endfor %}
   {% if has_any %}
@@ -102,17 +109,16 @@
             <td>{{ item.room }}</td>
             <td><span class="status {{ 'draft-tag' if item.status == 'Draft' else 'published-tag' }}">{{ item.status }}</span></td>
             <td class="row-actions">
-              {% if item.status == 'Draft' %}
               <button class="secondary-button small" type="button" onclick="toggleEdit({{ item.id }})"><i class="fa-solid fa-pen"></i> Edit</button>
+              {% if item.status == 'Draft' %}
               <form method="post" action="{{ url_for('publish_schedule', schedule_id=item.id) }}"><button class="primary-small" type="submit">Publish</button></form>
               {% endif %}
               <form method="post" action="{{ url_for('delete_schedule', schedule_id=item.id) }}" onsubmit="return confirm('Delete this session?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form>
             </td>
           </tr>
-          {% if item.status == 'Draft' %}
           <tr class="edit-row" id="edit-{{ item.id }}" style="display:none">
             <td colspan="9">
-              <form class="edit-slot-form" method="post" action="{{ url_for('edit_generated_schedule', schedule_id=item.id) }}">
+              <form class="edit-slot-form" method="post" action="{{ url_for('edit_generated_schedule', schedule_id=item.id) }}"{% if item.status == 'Published' %} onsubmit="return confirm('This session is published. Save these changes?')"{% endif %}>
                 <div class="form-grid four">
                   <label>Instructor<input name="teacher_name" value="{{ item.teacher_name }}"></label>
                   <label>Day<select name="day">{% for d in days %}<option value="{{ d }}" {% if item.day == d %}selected{% endif %}>{{ d }}</option>{% endfor %}</select></label>
@@ -124,7 +130,6 @@
               </form>
             </td>
           </tr>
-          {% endif %}
           {% endfor %}
         </tbody></table></div>
       </div>

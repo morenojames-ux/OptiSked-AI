@@ -24,9 +24,10 @@
         <small class="field-help">Only registered Teacher accounts are listed. Teachers already added here are hidden.</small>
       </label>
       <label>Courses They Can Teach
-        <input name="course_codes" id="instructorCourseCodes" list="courseCodeList" placeholder="e.g. CC101, CC201">
-        <small class="field-help">Auto-filled from the teacher's profile and history. Comma-separated; must match the Course Catalog.</small>
-        <datalist id="courseCodeList">{% for c in courses %}<option value="{{ c.course_code }}">{{ c.course_name }}</option>{% endfor %}</datalist>
+        <select name="course_codes" id="instructorCourseCodes" multiple size="6">
+          {% for c in courses %}<option value="{{ c.course_code }}">{{ c.course_code }} — {{ c.course_name }}</option>{% endfor %}
+        </select>
+        <small class="field-help">Multi-select. Auto-filled from the teacher's profile and history. Hold Ctrl/⌘ to select multiple.</small>
       </label>
     </div>
     <div class="subsection">
@@ -61,6 +62,18 @@
         <form method="post" action="{{ url_for('delete_instructor', instructor_id=inst.id) }}" onsubmit="return confirm('Remove this instructor?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form>
       </div>
 
+      <div class="np-block">
+        <strong>Edit Subjects</strong>
+        <form class="inline-window-form" method="post" action="{{ url_for('edit_instructor_subjects', instructor_id=inst.id) }}">
+          {% set current = inst.qualifications|map(attribute='course_code')|list %}
+          <label style="grid-column:1/-2">Select course codes
+            <select name="course_codes" multiple size="5">
+              {% for c in courses %}<option value="{{ c.course_code }}" {% if c.course_code in current %}selected{% endif %}>{{ c.course_code }} — {{ c.course_name }}</option>{% endfor %}
+            </select>
+          </label>
+          <button class="secondary-button" type="submit">Save Subjects</button>
+        </form>
+      </div>
       <div class="np-block">
         <strong>Non-preferred windows</strong>
         {% if inst.windows %}

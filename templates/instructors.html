@@ -1,0 +1,88 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Instructors</h1>
+    <p>Pick a registered teacher account, confirm the courses they can teach, and set any non-preferred day and time ranges for <strong>{{ session.get('program') }}</strong>.</p>
+  </div>
+</div>
+
+<div class="info-banner"><i class="fa-solid fa-circle-info"></i><div><strong>Non-preferred time is a hard rule.</strong> The AI will never schedule an instructor inside a day-and-time range you list below. Course codes control who is qualified to teach a subject.</div></div>
+
+<section class="card form-card">
+  <div class="card-title-row"><div><h2>Add an Instructor</h2><p>Select a teacher account. Course codes auto-fill from their profile; you can still edit them.</p></div></div>
+  {% if teacher_accounts %}
+  <form method="post" action="{{ url_for('instructors_page') }}">
+    <div class="form-grid two">
+      <label>Instructor Name
+        <select name="user_id" id="instructorTeacherSelect" required>
+          <option value="">Select a registered teacher…</option>
+          {% for t in teacher_accounts %}
+          <option value="{{ t.user_id }}" data-suggested="{{ t.suggested_codes|e }}">{{ t.full_name }} ({{ t.username }})</option>
+          {% endfor %}
+        </select>
+        <small class="field-help">Only registered Teacher accounts are listed. Teachers already added here are hidden.</small>
+      </label>
+      <label>Courses They Can Teach
+        <input name="course_codes" id="instructorCourseCodes" list="courseCodeList" placeholder="e.g. CC101, CC201">
+        <small class="field-help">Auto-filled from the teacher's profile and history. Comma-separated; must match the Course Catalog.</small>
+        <datalist id="courseCodeList">{% for c in courses %}<option value="{{ c.course_code }}">{{ c.course_name }}</option>{% endfor %}</datalist>
+      </label>
+    </div>
+    <div class="subsection">
+      <h3>Non-Preferred Day &amp; Time (optional)</h3>
+      <p>The AI will avoid scheduling this instructor inside these ranges.</p>
+      <div class="form-grid four">
+        <label>Day From<select name="day_from"><option value="">—</option>{% for d in days %}<option value="{{ d }}">{{ d }}</option>{% endfor %}</select></label>
+        <label>Day To<select name="day_to"><option value="">—</option>{% for d in days %}<option value="{{ d }}">{{ d }}</option>{% endfor %}</select></label>
+        <label>Time From<input type="time" name="np_start" value=""></label>
+        <label>Time To<input type="time" name="np_end" value=""></label>
+      </div>
+    </div>
+    <div class="form-actions"><button class="primary-button" type="submit"><i class="fa-solid fa-plus"></i> Add Instructor</button></div>
+  </form>
+  {% else %}
+  <div class="empty-inline"><i class="fa-solid fa-user-graduate"></i> No teacher accounts are available to assign. All registered teachers are already instructors here, or none have signed up yet. Register a new Teacher account first.</div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="section-title"><div><h2>Instructor Roster</h2><p>{{ instructors|length }} {{ 'instructor' if instructors|length == 1 else 'instructors' }} configured.</p></div></div>
+  {% if instructors %}
+    {% for inst in instructors %}
+    <div class="instructor-card">
+      <div class="instructor-head">
+        <div>
+          <h3>{{ inst.name }}</h3>
+          <div class="qual-list">
+            {% for q in inst.qualifications %}<span class="qual-pill">{{ q.course_code }}</span>{% else %}<span class="status plain-tag">No courses assigned</span>{% endfor %}
+          </div>
+        </div>
+        <form method="post" action="{{ url_for('delete_instructor', instructor_id=inst.id) }}" onsubmit="return confirm('Remove this instructor?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form>
+      </div>
+
+      <div class="np-block">
+        <strong>Non-preferred windows</strong>
+        {% if inst.windows %}
+        <div class="window-list">
+          {% for w in inst.windows %}
+          <div class="window-row">
+            <span><i class="fa-solid fa-ban"></i> {{ w.day_from }}–{{ w.day_to }} · {{ format_12hr(w.start_time) }}–{{ format_12hr(w.end_time) }}</span>
+            <form method="post" action="{{ url_for('delete_instructor_window', window_id=w.id) }}"><button class="danger-small" type="submit">Remove</button></form>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}<small class="field-help">None — this instructor is available any time.</small>{% endif %}
+        <form class="inline-window-form" method="post" action="{{ url_for('add_instructor_window', instructor_id=inst.id) }}">
+          <select name="day_from" required>{% for d in days %}<option value="{{ d }}">{{ d }}</option>{% endfor %}</select>
+          <select name="day_to" required>{% for d in days %}<option value="{{ d }}">{{ d }}</option>{% endfor %}</select>
+          <input type="time" name="np_start" required>
+          <input type="time" name="np_end" required>
+          <button class="secondary-button" type="submit">Add Window</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}<div class="empty-inline">No instructors yet. Add your first instructor above.</div>{% endif %}
+</section>
+{% endblock %}

@@ -8,12 +8,19 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from ml_scheduler import train_and_rank
+import ai_generator
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 INSTANCE_DIR = os.path.join(BASE_DIR, 'instance')
 DB_PATH = os.path.join(INSTANCE_DIR, 'optisked.db')
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'uploads')
-APP_TZ = ZoneInfo(os.environ.get('OPTISKED_TIMEZONE', 'Asia/Manila'))
+try:
+    APP_TZ = ZoneInfo(os.environ.get('OPTISKED_TIMEZONE', 'Asia/Manila'))
+except Exception:
+    try:
+        APP_TZ = ZoneInfo('UTC+8')  # fallback for Asia/Manila offset if db missing
+    except Exception:
+        APP_TZ = ZoneInfo('UTC')
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('OPTISKED_SECRET', 'change-this-in-production')
@@ -36,6 +43,17 @@ PROGRAMS = [
 ]
 YEAR_LEVELS = ['Year 1', 'Year 2', 'Year 3', 'Year 4']
 DURATION_OPTIONS = ['1', '1.5', '2', '2.5', '3', '3.5', '4']
+LAB_PATTERNS = [
+    {'value': 'whole_lab', 'label': 'Whole session is Laboratory',
+     'help': 'One lab meeting per week in a Computer Lab.'},
+    {'value': 'half_half', 'label': 'Half lecture, half laboratory',
+     'help': 'One day: a lecture block immediately followed by a lab block.'},
+    {'value': 'twice_both_lab', 'label': 'Meets twice a week (both Laboratory)',
+     'help': 'Two lab meetings per week in a Computer Lab.'},
+    {'value': 'twice_lab_lecture', 'label': 'Meets twice a week (Lab and Lecture)',
+     'help': 'One laboratory meeting and one lecture meeting per week.'},
+]
+LAB_PATTERN_VALUES = {p['value'] for p in LAB_PATTERNS}
 
 
 def db():
@@ -154,7 +172,60 @@ def init_db():
         FOREIGN KEY(student_user_id) REFERENCES users(id) ON DELETE CASCADE,
         UNIQUE(schedule_id, student_user_id, attendance_date)
     );
+    CREATE TABLE IF NOT EXISTS program_sections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program TEXT NOT NULL,
+        year_level TEXT NOT NULL,
+        section_name TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(program, year_level, section_name)
+    );
+    CREATE TABLE IF NOT EXISTS courses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program TEXT NOT NULL,
+        course_code TEXT NOT NULL,
+        course_name TEXT NOT NULL,
+        year_level TEXT NOT NULL,
+        sessions_per_week INTEGER DEFAULT 1,
+        has_lab INTEGER DEFAULT 0,
+        lab_pattern TEXT DEFAULT '',
+        duration_hours REAL DEFAULT 1.5,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS instructors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program TEXT NOT NULL,
+        name TEXT NOT NULL,
+        user_id INTEGER,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS instructor_unavailability (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instructor_id INTEGER NOT NULL,
+        day_from TEXT NOT NULL,
+        day_to TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        FOREIGN KEY(instructor_id) REFERENCES instructors(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS instructor_qualifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instructor_id INTEGER NOT NULL,
+        course_code TEXT NOT NULL,
+        FOREIGN KEY(instructor_id) REFERENCES instructors(id) ON DELETE CASCADE
+    );
     ''')
+    # AI schedule generator compatibility columns.
+    ensure_column(conn, 'schedules', 'session_type', "TEXT DEFAULT 'Lecture'")
+    ensure_column(conn, 'schedules', 'course_id', 'INTEGER')
+    ensure_column(conn, 'schedules', 'is_generated', 'INTEGER DEFAULT 0')
+    # Link instructors to their registered teacher account.
+    ensure_column(conn, 'instructors', 'user_id', 'INTEGER')
+    conn.execute('''UPDATE instructors SET user_id=(
+                        SELECT t.user_id FROM teachers t
+                        WHERE lower(t.full_name)=lower(instructors.name) AND t.user_id IS NOT NULL
+                        LIMIT 1)
+                    WHERE user_id IS NULL''')
     # Compatibility with databases created by earlier OptiSked builds.
     ensure_column(conn, 'users', 'program', "TEXT DEFAULT ''")
     ensure_column(conn, 'schedules', 'status', "TEXT DEFAULT 'Published'")
@@ -379,7 +450,7 @@ def sync_codes(schedule_id, conn=None):
     return teacher_code, student_code
 
 
-def conflicts_for(candidate, ignore_id=None, conn=None):
+def conflicts_for(candidate, ignore_id=None, conn=None, include_availability=True):
     owns = conn is None
     conn = conn or db()
     conflicts = []
@@ -407,7 +478,7 @@ def conflicts_for(candidate, ignore_id=None, conn=None):
             conflicts.append({'type':'Section conflict','message':f"{r['program']} {r['year_level']} - Section {r['section']} already has {r['subject_code']} at this time."})
 
     teacher = conn.execute('SELECT * FROM teachers WHERE lower(full_name)=lower(?) OR lower(username)=lower(?) LIMIT 1', (candidate.get('teacher_name',''), candidate.get('username',''))).fetchone()
-    if teacher:
+    if teacher and include_availability:
         prefs = [x.strip() for x in (teacher['preferred_days'] or '').split(',') if x.strip()]
         if prefs and candidate.get('day') not in prefs:
             conflicts.append({'type':'Availability conflict','message':f"{teacher['full_name']} is not available on {candidate.get('day')} based on preferred teaching days."})
@@ -554,6 +625,138 @@ def ai_model_status():
             "No published schedules are available for ML training yet."
         ),
     }
+
+
+def program_config(conn, program):
+    """Return the Program Head's sections, courses and instructors."""
+    sections = [dict(r) for r in conn.execute(
+        'SELECT * FROM program_sections WHERE program=? ORDER BY year_level,section_name',
+        (program,)).fetchall()]
+    courses = [dict(r) for r in conn.execute(
+        'SELECT * FROM courses WHERE program=? ORDER BY year_level,course_code',
+        (program,)).fetchall()]
+    instructors = [dict(r) for r in conn.execute(
+        'SELECT * FROM instructors WHERE program=? ORDER BY name', (program,)).fetchall()]
+    return sections, courses, instructors
+
+
+def teacher_accounts_for(conn, program):
+    """Registered teacher accounts not yet assigned as instructors in this program."""
+    rows = conn.execute('''SELECT t.user_id, t.id AS teacher_id, t.full_name, t.username,
+                                  t.subject_qualification
+                           FROM teachers t
+                           WHERE t.user_id IS NOT NULL
+                             AND NOT EXISTS (SELECT 1 FROM instructors i
+                                             WHERE i.program=? AND i.user_id=t.user_id)
+                           ORDER BY t.full_name''', (program,)).fetchall()
+    accounts = []
+    for r in rows:
+        account = dict(r)
+        codes = []
+        stored = [c.strip().upper() for c in re.split(r'[,\n]', account.get('subject_qualification') or '') if c.strip()]
+        codes.extend(stored)
+        for code in teacher_taught_codes(conn, account):
+            if code not in codes:
+                codes.append(code)
+        account['suggested_codes'] = ', '.join(codes)
+        accounts.append(account)
+    return accounts
+
+
+def teacher_taught_codes(conn, account):
+    """Distinct subject codes from schedules already tied to a teacher account."""
+    rows = conn.execute('''SELECT DISTINCT subject_code FROM schedules
+                           WHERE subject_code IS NOT NULL AND subject_code<>''
+                             AND (teacher_id=? OR lower(username)=lower(?))''',
+                        (account.get('teacher_id'), account.get('username') or '')).fetchall()
+    return sorted({r['subject_code'].strip().upper() for r in rows if r['subject_code'].strip()})
+
+
+def save_teacher_courses(conn, account, codes):
+    """Merge newly assigned course codes into the teacher's profile qualification."""
+    stored = [c.strip().upper() for c in re.split(r'[,\n]', account.get('subject_qualification') or '') if c.strip()]
+    merged = list(stored)
+    for code in codes:
+        code = code.strip().upper()
+        if code and code not in merged:
+            merged.append(code)
+    conn.execute('UPDATE teachers SET subject_qualification=? WHERE id=?',
+                 (', '.join(merged), account.get('teacher_id')))
+
+
+def load_generator_inputs(conn, program):
+    """Collect every input the AI generator needs for one program."""
+    sections, courses, instructors = program_config(conn, program)
+    qualifications, unavailability = [], []
+    instructor_ids = [i['id'] for i in instructors]
+    if instructor_ids:
+        placeholders = ','.join('?' for _ in instructor_ids)
+        qualifications = [dict(r) for r in conn.execute(
+            f'SELECT * FROM instructor_qualifications WHERE instructor_id IN ({placeholders})',
+            instructor_ids).fetchall()]
+        unavailability = [dict(r) for r in conn.execute(
+            f'SELECT * FROM instructor_unavailability WHERE instructor_id IN ({placeholders})',
+            instructor_ids).fetchall()]
+    rooms = list(ROOMS)
+    existing = [dict(r) for r in conn.execute('SELECT * FROM schedules').fetchall()]
+    for r in existing:
+        if r['room'] and r['room'] not in rooms:
+            rooms.append(r['room'])
+    return sections, courses, instructors, qualifications, unavailability, rooms, existing
+
+
+def build_year_groups(conn, program):
+    """Group a program's schedules by year level for the dashboard table."""
+    year_groups = []
+    for year in YEAR_LEVELS:
+        rows = conn.execute('''SELECT s.*,COUNT(sc.id) AS student_count
+                              FROM schedules s
+                              LEFT JOIN student_classes sc ON sc.schedule_id=s.id
+                              WHERE s.program=? AND s.year_level=?
+                              GROUP BY s.id
+                              ORDER BY s.section,s.day,s.start_time,s.id''', (program, year)).fetchall()
+        items = []
+        for srow in rows:
+            item = dict(srow)
+            item['formatted_time'] = f"{format_12hr(srow['start_time'])} – {format_12hr(srow['end_time'])}"
+            items.append(item)
+        year_groups.append({'year_level': year, 'items': items})
+    return year_groups
+
+
+def generated_slot_errors(conn, candidate, ignore_id=None):
+    """Validate a scheduled slot using the same hard rules as the AI generator.
+
+    Teacher availability hours and preferred days are intentionally NOT enforced
+    here so manual edits match how the AI placed sessions (clash, room type,
+    time window and non-preferred windows only).
+    """
+    errors = [c['message'] for c in conflicts_for(candidate, ignore_id=ignore_id, conn=conn, include_availability=False)]
+    session_type = candidate.get('session_type') or 'Lecture'
+    if ai_generator.room_type(candidate.get('room', '')) != ai_generator.session_room_type(session_type):
+        errors.append(f"A {session_type} session must use a matching room type.")
+
+    # Instructor non-preferred windows are a hard rule, so edits must respect
+    # them too -- not just the initial AI generation.
+    program = candidate.get('program', '')
+    name = (candidate.get('teacher_name') or '').strip()
+    if name:
+        inst = conn.execute('SELECT id FROM instructors WHERE program=? AND lower(name)=lower(?) LIMIT 1',
+                            (program, name)).fetchone()
+        if inst:
+            start = parse_minutes(candidate.get('start_time'))
+            end = parse_minutes(candidate.get('end_time'))
+            for w in conn.execute('SELECT * FROM instructor_unavailability WHERE instructor_id=?', (inst['id'],)).fetchall():
+                if not ai_generator.day_within_range(candidate.get('day', ''), w['day_from'], w['day_to']):
+                    continue
+                w_start = parse_minutes(w['start_time'])
+                w_end = parse_minutes(w['end_time'])
+                if w_start >= 0 and w_end >= 0 and start < w_end and w_start < end:
+                    errors.append(
+                        f"{name} is unavailable {w['day_from']}–{w['day_to']} "
+                        f"{format_12hr(w['start_time'])}–{format_12hr(w['end_time'])} (non-preferred time)."
+                    )
+    return errors
 
 def form_data_from_request():
     duration_hours = request.form.get('duration_hours', '1.5').strip()
@@ -710,78 +913,440 @@ def dashboard():
     if not program:
         return redirect(url_for('program_head_setup'))
     conn = db()
-    schedules = conn.execute('''SELECT * FROM schedules
-                                WHERE program=?
-                                ORDER BY CASE year_level WHEN 'Year 1' THEN 1 WHEN 'Year 2' THEN 2 WHEN 'Year 3' THEN 3 WHEN 'Year 4' THEN 4 ELSE 9 END,
-                                         section,day,start_time,id''', (program,)).fetchall()
-    teachers = conn.execute('''SELECT t.* FROM teachers t JOIN users u ON u.id=t.user_id
-                               WHERE u.role='teacher' ORDER BY t.full_name''').fetchall()
+    year_groups = build_year_groups(conn, program)
+    sections, courses, instructors = program_config(conn, program)
+    draft_count = conn.execute("SELECT COUNT(*) AS n FROM schedules WHERE program=? AND status='Draft'", (program,)).fetchone()['n']
+    published_count = conn.execute("SELECT COUNT(*) AS n FROM schedules WHERE program=? AND status='Published'", (program,)).fetchone()['n']
+    conn.close()
+    report = session.pop('generation_report', None)
+    return render_template('schedule_builder.html', active_page='dashboard',
+                           year_groups=year_groups, sections=sections, courses=courses,
+                           instructors=instructors, draft_count=draft_count,
+                           published_count=published_count, ai_model_info=ai_model_status(),
+                           report=report, lab_patterns=LAB_PATTERNS)
+
+
+@app.route('/instructors', methods=['GET', 'POST'])
+@role_required('program_head')
+def instructors_page():
+    program = session.get('program','').strip()
+    if not program:
+        return redirect(url_for('program_head_setup'))
+    conn = db()
+    if request.method == 'POST':
+        user_id = request.form.get('user_id','').strip()
+        teacher = conn.execute('SELECT * FROM teachers WHERE user_id=?', (user_id,)).fetchone() if user_id.isdigit() else None
+        codes = request.form.get('course_codes','')
+        day_from = request.form.get('day_from','').strip()
+        day_to = request.form.get('day_to','').strip()
+        np_start = request.form.get('np_start','').strip()
+        np_end = request.form.get('np_end','').strip()
+        if not teacher:
+            flash('Please select a registered teacher account.', 'error')
+        elif conn.execute('SELECT 1 FROM instructors WHERE program=? AND user_id=?',
+                          (program, teacher['user_id'])).fetchone():
+            flash('That teacher is already an instructor in your program.', 'error')
+        else:
+            name = teacher['full_name']
+            cur = conn.execute('INSERT INTO instructors(program,name,user_id) VALUES(?,?,?)',
+                               (program, name, teacher['user_id']))
+            instructor_id = cur.lastrowid
+            assigned = [c.strip() for c in re.split(r'[,\n]', codes) if c.strip()]
+            for code in assigned:
+                conn.execute('INSERT INTO instructor_qualifications(instructor_id,course_code) VALUES(?,?)',
+                             (instructor_id, code))
+            account = {'teacher_id': teacher['id'], 'username': teacher['username'],
+                       'subject_qualification': teacher['subject_qualification']}
+            save_teacher_courses(conn, account, assigned)
+            if day_from and day_to and np_start and np_end:
+                if day_from not in DAYS or day_to not in DAYS:
+                    flash('Non-preferred day range must use valid weekday names.', 'error')
+                else:
+                    conn.execute('''INSERT INTO instructor_unavailability(instructor_id,day_from,day_to,start_time,end_time)
+                                    VALUES(?,?,?,?,?)''', (instructor_id, day_from, day_to, np_start, np_end))
+            conn.commit()
+            flash(f'Instructor {name} saved.', 'success')
+        return redirect(url_for('instructors_page'))
+    instructors = [dict(r) for r in conn.execute('SELECT * FROM instructors WHERE program=? ORDER BY name', (program,)).fetchall()]
+    for inst in instructors:
+        inst['qualifications'] = [dict(r) for r in conn.execute(
+            'SELECT * FROM instructor_qualifications WHERE instructor_id=? ORDER BY course_code', (inst['id'],)).fetchall()]
+        inst['windows'] = [dict(r) for r in conn.execute(
+            'SELECT * FROM instructor_unavailability WHERE instructor_id=? ORDER BY day_from,start_time', (inst['id'],)).fetchall()]
+    courses = [dict(r) for r in conn.execute('SELECT * FROM courses WHERE program=? ORDER BY course_code', (program,)).fetchall()]
+    teacher_accounts = teacher_accounts_for(conn, program)
+    conn.close()
+    return render_template('instructors.html', active_page='instructors', instructors=instructors,
+                           courses=courses, days=DAYS, teacher_accounts=teacher_accounts)
+
+
+def _owns_instructor(conn, program, instructor_id):
+    return conn.execute('SELECT id FROM instructors WHERE id=? AND program=?', (instructor_id, program)).fetchone()
+
+
+@app.route('/instructors/<int:instructor_id>/delete', methods=['POST'])
+@role_required('program_head')
+def delete_instructor(instructor_id):
+    program = session.get('program','').strip()
+    conn = db()
+    if _owns_instructor(conn, program, instructor_id):
+        conn.execute('DELETE FROM instructors WHERE id=?', (instructor_id,))
+        conn.commit()
+        flash('Instructor removed.', 'success')
+    else:
+        flash('Instructor not found in your program.', 'error')
+    conn.close()
+    return redirect(url_for('instructors_page'))
+
+
+@app.route('/instructors/<int:instructor_id>/windows', methods=['POST'])
+@role_required('program_head')
+def add_instructor_window(instructor_id):
+    program = session.get('program','').strip()
+    day_from = request.form.get('day_from','').strip()
+    day_to = request.form.get('day_to','').strip()
+    np_start = request.form.get('np_start','').strip()
+    np_end = request.form.get('np_end','').strip()
+    conn = db()
+    if not _owns_instructor(conn, program, instructor_id):
+        conn.close(); flash('Instructor not found in your program.', 'error'); return redirect(url_for('instructors_page'))
+    if day_from in DAYS and day_to in DAYS and np_start and np_end:
+        conn.execute('''INSERT INTO instructor_unavailability(instructor_id,day_from,day_to,start_time,end_time)
+                        VALUES(?,?,?,?,?)''', (instructor_id, day_from, day_to, np_start, np_end))
+        conn.commit()
+        flash('Non-preferred time window added.', 'success')
+    else:
+        flash('Please provide a valid day range and time range.', 'error')
+    conn.close()
+    return redirect(url_for('instructors_page'))
+
+
+@app.route('/instructors/windows/<int:window_id>/delete', methods=['POST'])
+@role_required('program_head')
+def delete_instructor_window(window_id):
+    program = session.get('program','').strip()
+    conn = db()
+    row = conn.execute('''SELECT w.id FROM instructor_unavailability w
+                          JOIN instructors i ON i.id=w.instructor_id
+                          WHERE w.id=? AND i.program=?''', (window_id, program)).fetchone()
+    if row:
+        conn.execute('DELETE FROM instructor_unavailability WHERE id=?', (window_id,))
+        conn.commit()
+        flash('Non-preferred window removed.', 'success')
+    else:
+        flash('Window not found.', 'error')
+    conn.close()
+    return redirect(url_for('instructors_page'))
+
+
+@app.route('/courses', methods=['GET', 'POST'])
+@role_required('program_head')
+def courses_page():
+    program = session.get('program','').strip()
+    if not program:
+        return redirect(url_for('program_head_setup'))
+    conn = db()
+    if request.method == 'POST':
+        course_code = request.form.get('course_code','').strip()
+        course_name = request.form.get('course_name','').strip()
+        year_level = request.form.get('year_level','Year 1').strip()
+        sessions = request.form.get('sessions_per_week','1').strip()
+        has_lab = 1 if request.form.get('has_lab') else 0
+        lab_pattern = request.form.get('lab_pattern','').strip()
+        duration = request.form.get('duration_hours','1.5').strip()
+        try:
+            sessions = max(1, int(sessions))
+        except Exception:
+            sessions = 1
+        if not course_code or not course_name:
+            flash('Course code and course name are required.', 'error')
+        elif year_level not in YEAR_LEVELS:
+            flash('Please select a valid year level.', 'error')
+        elif duration not in DURATION_OPTIONS:
+            flash('Please select a valid session duration.', 'error')
+        elif has_lab and lab_pattern not in LAB_PATTERN_VALUES:
+            flash('Please choose a valid laboratory meeting pattern.', 'error')
+        else:
+            if not has_lab:
+                lab_pattern = ''
+            conn.execute('''INSERT INTO courses(program,course_code,course_name,year_level,sessions_per_week,has_lab,lab_pattern,duration_hours)
+                            VALUES(?,?,?,?,?,?,?,?)''',
+                         (program, course_code, course_name, year_level, sessions, has_lab, lab_pattern, float(duration)))
+            conn.commit()
+            flash(f'Course {course_code} saved.', 'success')
+        return redirect(url_for('courses_page'))
+    courses = [dict(r) for r in conn.execute('SELECT * FROM courses WHERE program=? ORDER BY year_level,course_code', (program,)).fetchall()]
+    conn.close()
+    return render_template('courses.html', active_page='courses', courses=courses,
+                           year_levels=YEAR_LEVELS, duration_options=DURATION_OPTIONS,
+                           lab_patterns=LAB_PATTERNS)
+
+
+@app.route('/courses/<int:course_id>/delete', methods=['POST'])
+@role_required('program_head')
+def delete_course(course_id):
+    program = session.get('program','').strip()
+    conn = db()
+    row = conn.execute('SELECT id FROM courses WHERE id=? AND program=?', (course_id, program)).fetchone()
+    if row:
+        conn.execute('DELETE FROM courses WHERE id=?', (course_id,))
+        conn.commit()
+        flash('Course removed.', 'success')
+    else:
+        flash('Course not found in your program.', 'error')
+    conn.close()
+    return redirect(url_for('courses_page'))
+
+
+@app.route('/sections', methods=['GET', 'POST'])
+@role_required('program_head')
+def sections_page():
+    program = session.get('program','').strip()
+    if not program:
+        return redirect(url_for('program_head_setup'))
+    conn = db()
+    if request.method == 'POST':
+        year_level = request.form.get('year_level','Year 1').strip()
+        section_name = request.form.get('section_name','').strip().upper()
+        if not section_name:
+            flash('Section name is required.', 'error')
+        elif year_level not in YEAR_LEVELS:
+            flash('Please select a valid year level.', 'error')
+        else:
+            try:
+                conn.execute('INSERT INTO program_sections(program,year_level,section_name) VALUES(?,?,?)',
+                             (program, year_level, section_name))
+                conn.commit()
+                flash(f'Section {section_name} added to {year_level}.', 'success')
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                flash('That section already exists for this year level.', 'error')
+        return redirect(url_for('sections_page'))
     year_groups = []
     for year in YEAR_LEVELS:
-        rows = conn.execute('''SELECT s.*,COUNT(sc.id) AS student_count
-                              FROM schedules s
-                              LEFT JOIN student_classes sc ON sc.schedule_id=s.id
-                              WHERE s.program=? AND s.year_level=?
-                              GROUP BY s.id
-                              ORDER BY s.section,s.day,s.start_time,s.id''', (program,year)).fetchall()
-        items=[]
-        for srow in rows:
-            item=dict(srow)
-            item['formatted_time']=f"{format_12hr(srow['start_time'])} – {format_12hr(srow['end_time'])}"
-            items.append(item)
-        year_groups.append({'year_level':year,'items':items})
+        items = [dict(r) for r in conn.execute(
+            'SELECT * FROM program_sections WHERE program=? AND year_level=? ORDER BY section_name',
+            (program, year)).fetchall()]
+        year_groups.append({'year_level': year, 'items': items})
     conn.close()
-    ml_info = ai_model_status()
-    return render_template('schedule_builder.html', active_page='dashboard', schedules=schedules,
-                           year_groups=year_groups, teachers=teachers, show_form=request.args.get('add')=='1', form={},
-                           ai_model_info=ml_info)
+    return render_template('sections.html', active_page='sections', year_groups=year_groups,
+                           year_levels=YEAR_LEVELS)
 
 
-@app.route('/schedule/add', methods=['POST'])
+@app.route('/sections/<int:section_id>/delete', methods=['POST'])
 @role_required('program_head')
-def add_schedule():
-    f=form_data_from_request()
-    conn=db()
-    # Resolve the selected Teacher account first. Only users registered with the Teacher role are valid.
-    teacher=conn.execute('''SELECT t.* FROM teachers t JOIN users u ON u.id=t.user_id WHERE u.role='teacher' AND t.id=? LIMIT 1''',(f['teacher_id'],)).fetchone()
-    if teacher:
-        f['teacher_name'] = teacher['full_name']
-    errors=validate_form(f)
-    program_head_program=session.get('program','').strip()
-    if f.get('program') and f.get('program') != program_head_program:
-        errors.append(f'You are assigned to {program_head_program}. Schedules can only be added for your assigned program.')
-    f['program'] = program_head_program
-    if not teacher:
-        errors.append('Please select a teacher account from the Teacher dropdown.')
-    if not errors:
-        errors=[x['message'] for x in conflicts_for(f,conn=conn)]
-    if errors:
-        fixes, ml_info = ai_find_fixes(f) if errors else ([], ai_model_status())
-        schedules = conn.execute('''SELECT * FROM schedules WHERE program=?
-                                    ORDER BY CASE year_level WHEN 'Year 1' THEN 1 WHEN 'Year 2' THEN 2 WHEN 'Year 3' THEN 3 WHEN 'Year 4' THEN 4 ELSE 9 END,
-                                             section,day,start_time,id''', (program_head_program,)).fetchall()
-        teachers = conn.execute('''SELECT t.* FROM teachers t JOIN users u ON u.id=t.user_id
-                                   WHERE u.role='teacher' ORDER BY t.full_name''').fetchall()
-        year_groups=[]
-        for year in YEAR_LEVELS:
-            rows = conn.execute('''SELECT s.*,COUNT(sc.id) AS student_count FROM schedules s
-                                  LEFT JOIN student_classes sc ON sc.schedule_id=s.id
-                                  WHERE s.program=? AND s.year_level=? GROUP BY s.id
-                                  ORDER BY s.section,s.day,s.start_time,s.id''', (program_head_program,year)).fetchall()
-            year_groups.append({'year_level':year,'items':[dict(r) | {'formatted_time':f"{format_12hr(r['start_time'])} – {format_12hr(r['end_time'])}"} for r in rows]})
-        conn.close()
-        flash('Schedule was not saved because a conflict or validation issue was detected. Review the AI suggestions below.','error')
-        return render_template('schedule_builder.html',active_page='dashboard',schedules=schedules,year_groups=year_groups,teachers=teachers,show_form=True,form=f,conflict_messages=errors,ai_suggestions=fixes,ai_model_info=ml_info)
+def delete_section(section_id):
+    program = session.get('program','').strip()
+    conn = db()
+    row = conn.execute('SELECT id FROM program_sections WHERE id=? AND program=?', (section_id, program)).fetchone()
+    if row:
+        conn.execute('DELETE FROM program_sections WHERE id=?', (section_id,))
+        conn.commit()
+        flash('Section removed.', 'success')
+    else:
+        flash('Section not found in your program.', 'error')
+    conn.close()
+    return redirect(url_for('sections_page'))
 
-    # Always use the account's canonical name/username. The Program Head does not type or edit teacher usernames.
-    teacher_id=teacher['id']; teacher_username=teacher['username']
-    conn.execute('UPDATE teachers SET available_from=?,available_until=?,preferred_days=? WHERE id=?',(f['available_from'],f['available_until'],f['preferred_days'] or teacher['preferred_days'],teacher_id))
-    cur=conn.execute('''INSERT INTO schedules(teacher_id,teacher_name,username,subject_code,subject_name,program,year_level,section,day,start_time,end_time,room,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',(teacher_id,f['teacher_name'],teacher_username,f['subject_code'],f['subject_name'],f['program'],f['year_level'],f['section'],f['day'],f['start_time'],f['end_time'],f['room'],'Published'))
-    schedule_id=cur.lastrowid
-    teacher_code,student_code=sync_codes(schedule_id,conn)
-    conn.commit(); conn.close()
-    flash(f'Schedule added successfully. Teacher Code: {teacher_code} • Student Code: {student_code}','success')
+
+@app.route('/ai/generate', methods=['POST'])
+@role_required('program_head')
+def ai_generate():
+    program = session.get('program','').strip()
+    if not program:
+        return redirect(url_for('program_head_setup'))
+    conn = db()
+    sections, courses, instructors, qualifications, unavailability, rooms, existing = load_generator_inputs(conn, program)
+    if not courses or not sections:
+        conn.close()
+        flash('Add at least one course and one section before generating a schedule.', 'error')
+        return redirect(url_for('dashboard'))
+
+    result = ai_generator.generate(courses, sections, instructors, qualifications, unavailability, rooms, existing)
+
+    # Replace any previous draft for this program with the fresh AI output.
+    conn.execute("DELETE FROM schedules WHERE program=? AND status='Draft'", (program,))
+    instructors_by_id = {i['id']: i for i in instructors}
+    teachers_by_user = {r['user_id']: r for r in conn.execute('SELECT * FROM teachers').fetchall()}
+    teacher_lookup = {(r['full_name'] or '').strip().lower(): r for r in conn.execute('SELECT * FROM teachers').fetchall()}
+    for row in result['rows']:
+        match = None
+        inst = instructors_by_id.get(row.get('instructor_id'))
+        if inst and inst.get('user_id') is not None:
+            match = teachers_by_user.get(inst['user_id'])
+        if not match:
+            match = teacher_lookup.get((row['teacher_name'] or '').strip().lower())
+        teacher_id = match['id'] if match else None
+        username = match['username'] if match else ''
+        conn.execute('''INSERT INTO schedules(teacher_id,teacher_name,username,subject_code,subject_name,program,year_level,section,day,start_time,end_time,room,status,session_type,course_id,is_generated)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                     (teacher_id, row['teacher_name'], username, row['subject_code'], row['subject_name'],
+                      row['program'], row['year_level'], row['section'], row['day'], row['start_time'],
+                      row['end_time'], row['room'], 'Draft', row['session_type'], row['course_id'], 1))
+    conn.commit()
+    conn.close()
+
+    report = dict(result['report'])
+    report['ml'] = result['ml']
+    session['generation_report'] = report
+    flash(f"AI generated {len(result['rows'])} draft session(s). {result['report']['message']}", 'success')
     return redirect(url_for('dashboard'))
+
+
+@app.route('/ai/clear-drafts', methods=['POST'])
+@role_required('program_head')
+def clear_drafts():
+    program = session.get('program','').strip()
+    conn = db()
+    conn.execute("DELETE FROM schedules WHERE program=? AND status='Draft'", (program,))
+    conn.commit()
+    conn.close()
+    flash('All draft sessions cleared.', 'success')
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/ai/publish-all', methods=['POST'])
+@role_required('program_head')
+def publish_all_drafts():
+    program = session.get('program','').strip()
+    conn = db()
+    drafts = conn.execute("SELECT id FROM schedules WHERE program=? AND status='Draft'", (program,)).fetchall()
+    for row in drafts:
+        conn.execute("UPDATE schedules SET status='Published' WHERE id=?", (row['id'],))
+        sync_codes(row['id'], conn)
+    conn.commit()
+    conn.close()
+    flash(f'{len(drafts)} draft session(s) published with access codes.', 'success')
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/schedule/<int:schedule_id>/publish', methods=['POST'])
+@role_required('program_head')
+def publish_schedule(schedule_id):
+    program = session.get('program','').strip()
+    conn = db()
+    row = conn.execute('SELECT * FROM schedules WHERE id=? AND program=?', (schedule_id, program)).fetchone()
+    if not row:
+        conn.close(); flash('Schedule not found in your program.', 'error'); return redirect(url_for('dashboard'))
+    conn.execute("UPDATE schedules SET status='Published' WHERE id=?", (schedule_id,))
+    sync_codes(schedule_id, conn)
+    conn.commit()
+    conn.close()
+    flash('Schedule published.', 'success')
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/schedule/<int:schedule_id>/edit', methods=['POST'])
+@role_required('program_head')
+def edit_generated_schedule(schedule_id):
+    program = session.get('program','').strip()
+    conn = db()
+    row = conn.execute('SELECT * FROM schedules WHERE id=? AND program=?', (schedule_id, program)).fetchone()
+    if not row:
+        conn.close(); flash('Schedule not found in your program.', 'error'); return redirect(url_for('dashboard'))
+    if row['status'] == 'Published':
+        conn.close(); flash('Published schedules cannot be edited here.', 'error'); return redirect(url_for('dashboard'))
+
+    day = request.form.get('day', row['day']).strip()
+    start_time = request.form.get('start_time', row['start_time']).strip()
+    end_time = request.form.get('end_time', row['end_time']).strip()
+    room = request.form.get('room', row['room']).strip()
+    teacher_name = request.form.get('teacher_name', row['teacher_name']).strip()
+
+    errors = []
+    if day not in DAYS:
+        errors.append('Invalid day.')
+    if parse_minutes(start_time) < 0 or parse_minutes(end_time) < 0 or parse_minutes(start_time) >= parse_minutes(end_time):
+        errors.append('End time must be later than start time.')
+    candidate = dict(row)
+    candidate.update(day=day, start_time=start_time, end_time=end_time, room=room, teacher_name=teacher_name)
+    if not errors:
+        errors = generated_slot_errors(conn, candidate, ignore_id=schedule_id)
+
+    if errors:
+        conn.close()
+        flash('Edit rejected: ' + ' '.join(errors), 'error')
+        return redirect(url_for('dashboard'))
+
+    conn.execute('UPDATE schedules SET day=?,start_time=?,end_time=?,room=?,teacher_name=? WHERE id=?',
+                 (day, start_time, end_time, room, teacher_name, schedule_id))
+    conn.commit()
+    conn.close()
+    flash('Draft session updated.', 'success')
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/schedule/<int:schedule_id>/move', methods=['POST'])
+@role_required('program_head')
+def move_schedule(schedule_id):
+    """Drag-and-drop endpoint: move a session to a new day/time.
+
+    Validation uses the AI hard rules (clash, room type, time window and
+    instructor non-preferred windows). Access codes do not encode day/time
+    (see make_codes), so no re-sync is required when only the slot changes.
+    """
+    program = session.get('program','').strip()
+    payload = request.get_json(silent=True) or request.form
+    day = (payload.get('day') or '').strip()
+    start_time = (payload.get('start_time') or '').strip()
+    end_time = (payload.get('end_time') or '').strip()
+
+    conn = db()
+    row = conn.execute('SELECT * FROM schedules WHERE id=? AND program=?', (schedule_id, program)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify(ok=False, errors=['Schedule not found in your program.']), 404
+
+    errors = []
+    if day not in DAYS:
+        errors.append('Invalid day.')
+    start = parse_minutes(start_time)
+    end = parse_minutes(end_time)
+    if start < 0 or end < 0 or start >= end:
+        errors.append('End time must be later than start time.')
+
+    candidate = dict(row)
+    candidate.update(day=day, start_time=start_time, end_time=end_time)
+    if not errors:
+        errors = generated_slot_errors(conn, candidate, ignore_id=schedule_id)
+
+    if errors:
+        conn.close()
+        return jsonify(ok=False, errors=errors), 409
+
+    conn.execute('UPDATE schedules SET day=?,start_time=?,end_time=? WHERE id=?',
+                 (day, start_time, end_time, schedule_id))
+    conn.commit()
+    conn.close()
+    return jsonify(ok=True, id=schedule_id, day=day, start_time=start_time,
+                   end_time=end_time, status=row['status'])
+
+
+@app.route('/calendar')
+@role_required('program_head')
+def calendar_editor():
+    program = session.get('program','').strip()
+    if not program:
+        return redirect(url_for('program_head_setup'))
+    conn = db()
+    sections = [dict(r) for r in conn.execute(
+        'SELECT * FROM program_sections WHERE program=? ORDER BY year_level,section_name',
+        (program,)).fetchall()]
+    rows = conn.execute('''SELECT id,day,start_time,end_time,room,teacher_name,subject_code,
+                                  subject_name,session_type,status,year_level,section,course_id
+                           FROM schedules WHERE program=?
+                           ORDER BY year_level,section,day,start_time''', (program,)).fetchall()
+    events = [dict(r) for r in rows]
+    conn.close()
+    grid = {
+        'day_start': 450,
+        'day_end': 1260,
+        'step': 30,
+        'px_per_hour': 56,
+        'days': DAYS,
+    }
+    return render_template('calendar.html', active_page='calendar', sections=sections,
+                           events=events, grid=grid)
 
 
 @app.route('/schedule/<int:schedule_id>/delete',methods=['POST'])
@@ -793,33 +1358,6 @@ def delete_schedule(schedule_id):
     if row['program'] != session.get('program',''):
         conn.close(); flash('You can only delete schedules in your assigned program.','error'); return redirect(url_for('dashboard'))
     conn.execute('DELETE FROM schedules WHERE id=?',(schedule_id,)); conn.commit(); conn.close(); flash('Schedule and linked access codes deleted.','success'); return redirect(url_for('dashboard'))
-
-
-@app.route('/ai/conflicts',methods=['POST'])
-@role_required('program_head')
-def ai_conflicts():
-    data=request.get_json(silent=True) or {}
-    data['program'] = session.get('program','').strip()
-    errors=validate_form(data)
-    conn=db(); conflicts=[] if errors else conflicts_for(data,conn=conn); conn.close()
-    fixes, ml_info = ai_find_fixes(data) if conflicts else ([], ai_model_status())
-    return jsonify({'ok':not errors and not conflicts,'conflicts':[{'type':'Validation','message':e} for e in errors]+conflicts,'suggestions':fixes,'ml':ml_info})
-
-
-@app.route('/api/schedule/<int:schedule_id>/apply-fix',methods=['POST'])
-@role_required('program_head')
-def apply_fix(schedule_id):
-    data=request.get_json(silent=True) or {}
-    conn=db(); row=conn.execute('SELECT * FROM schedules WHERE id=?',(schedule_id,)).fetchone()
-    if not row: conn.close(); return jsonify({'ok':False,'error':'Schedule not found.'}),404
-    if row['program'] != session.get('program',''):
-        conn.close(); return jsonify({'ok':False,'error':'You can only modify schedules in your assigned program.'}),403
-    candidate=dict(row); candidate.update({k:data[k] for k in ('day','start_time','end_time','room') if data.get(k)})
-    conflicts=conflicts_for(candidate,ignore_id=schedule_id,conn=conn)
-    if conflicts: conn.close(); return jsonify({'ok':False,'error':'The proposed fix still has conflicts.','conflicts':conflicts}),409
-    conn.execute('UPDATE schedules SET day=?,start_time=?,end_time=?,room=?,status=? WHERE id=?',(candidate['day'],candidate['start_time'],candidate['end_time'],candidate['room'],'Published',schedule_id))
-    sync_codes(schedule_id,conn); conn.commit(); conn.close()
-    return jsonify({'ok':True,'message':'AI Fix applied successfully.','schedule':candidate})
 
 
 @app.route('/code-generation',methods=['GET','POST'])

@@ -18,7 +18,11 @@
     <div class="role-label">{{ session.get('role','').replace('_',' ').upper() }}{% if session.get('role') == 'program_head' and session.get('program') %} · {{ session.get('program') }}{% endif %}</div>
     <nav>
       {% if session.get('role') == 'program_head' %}
-      <a class="{% if active_page == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-calendar-days"></i><span>Schedule Builder</span></a>
+      <a class="{% if active_page == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}"><i class="fa-solid fa-wand-magic-sparkles"></i><span>AI Schedule Generator</span></a>
+      <a class="{% if active_page == 'calendar' %}active{% endif %}" href="{{ url_for('calendar_editor') }}"><i class="fa-solid fa-calendar-days"></i><span>Calendar Editor</span></a>
+      <a class="{% if active_page == 'sections' %}active{% endif %}" href="{{ url_for('sections_page') }}"><i class="fa-solid fa-layer-group"></i><span>Sections</span></a>
+      <a class="{% if active_page == 'courses' %}active{% endif %}" href="{{ url_for('courses_page') }}"><i class="fa-solid fa-book"></i><span>Courses</span></a>
+      <a class="{% if active_page == 'instructors' %}active{% endif %}" href="{{ url_for('instructors_page') }}"><i class="fa-solid fa-chalkboard-user"></i><span>Instructors</span></a>
       <a class="{% if active_page == 'code_generation' %}active{% endif %}" href="{{ url_for('code_generation') }}"><i class="fa-solid fa-key"></i><span>Code Generation</span></a>
       <a class="{% if active_page == 'attendance' %}active{% endif %}" href="{{ url_for('attendance_records') }}"><i class="fa-solid fa-clipboard-user"></i><span>Attendance Records</span></a>
       {% elif session.get('role') == 'teacher' %}

@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Courses</h1>
+    <p>Enter every course the AI should schedule for <strong>{{ session.get('program') }}</strong>, including whether it has a laboratory.</p>
+  </div>
+</div>
+
+<div class="info-banner"><i class="fa-solid fa-circle-info"></i><div><strong>Laboratory courses.</strong> Turn on <strong>Has Laboratory</strong> and choose one meeting pattern. Laboratory sessions are always placed in a Computer Lab; lectures always in a Lecture Room.</div></div>
+
+<section class="card form-card">
+  <div class="card-title-row"><div><h2>Add a Course</h2><p>Course code, name, year level, weekly sessions, and lab details.</p></div></div>
+  <form method="post" action="{{ url_for('courses_page') }}">
+    <div class="form-grid two">
+      <label>Course Code<input name="course_code" placeholder="e.g. CC 101" required></label>
+      <label>Course Name<input name="course_name" placeholder="e.g. Programming 1" required></label>
+      <label>Year Level
+        <select name="year_level" required>{% for y in year_levels %}<option value="{{ y }}">{{ y }}</option>{% endfor %}</select>
+      </label>
+      <label>Number of Sessions per Week<input type="number" name="sessions_per_week" min="1" max="5" value="2">
+        <small class="field-help">Used for courses without a laboratory.</small>
+      </label>
+      <label>Duration per Session (hours)
+        <select name="duration_hours" required>{% for d in duration_options %}<option value="{{ d }}" {% if d=='1.5' %}selected{% endif %}>{{ d }} {% if d=='1' %}Hour{% else %}Hours{% endif %}</option>{% endfor %}</select>
+      </label>
+      <label class="lab-toggle-label">
+        <span class="lab-toggle-row"><input type="checkbox" name="has_lab" id="hasLabToggle" onchange="toggleLabOptions()"> Has Laboratory</span>
+      </label>
+    </div>
+
+    <div class="subsection lab-options" id="labOptions" style="display:none">
+      <h3>Laboratory Meeting Pattern</h3>
+      <p>Choose exactly one pattern for this subject.</p>
+      <div class="lab-radio-grid">
+        {% for p in lab_patterns %}
+        <label class="lab-radio">
+          <input type="radio" name="lab_pattern" value="{{ p.value }}" {% if loop.first %}checked{% endif %}>
+          <span><strong>{{ p.label }}</strong><small>{{ p.help }}</small></span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="form-actions"><button class="primary-button" type="submit"><i class="fa-solid fa-plus"></i> Add Course</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="section-title"><div><h2>Course Catalog</h2><p>{{ courses|length }} {{ 'course' if courses|length == 1 else 'courses' }} configured.</p></div></div>
+  {% if courses %}
+  <div class="table-wrap"><table><thead><tr><th>Code</th><th>Course</th><th>Year</th><th>Sessions</th><th>Laboratory</th><th>Duration</th><th>Action</th></tr></thead><tbody>
+    {% for c in courses %}
+    <tr>
+      <td><strong>{{ c.course_code }}</strong></td>
+      <td>{{ c.course_name }}</td>
+      <td>{{ c.year_level }}</td>
+      <td>{{ c.sessions_per_week }} / week</td>
+      <td>
+        {% if c.has_lab %}
+        {% for p in lab_patterns %}{% if p.value == c.lab_pattern %}<span class="status lab-tag">{{ p.label }}</span>{% endif %}{% endfor %}
+        {% else %}
+        <span class="status plain-tag">No laboratory</span>
+        {% endif %}
+      </td>
+      <td>{{ c.duration_hours }} h</td>
+      <td><form method="post" action="{{ url_for('delete_course', course_id=c.id) }}" onsubmit="return confirm('Remove this course?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form></td>
+    </tr>
+    {% endfor %}
+  </tbody></table></div>
+  {% else %}<div class="empty-inline">No courses yet. Add your first course above.</div>{% endif %}
+</section>
+
+<script>
+function toggleLabOptions(){
+  const toggle=document.getElementById('hasLabToggle');
+  const box=document.getElementById('labOptions');
+  if(!toggle||!box)return;
+  box.style.display=toggle.checked?'block':'none';
+}
+document.addEventListener('DOMContentLoaded',toggleLabOptions);
+</script>
+{% endblock %}

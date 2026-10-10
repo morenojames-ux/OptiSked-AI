@@ -89,3 +89,48 @@ A newly installed system can have little historical data. The rule-based conflic
 ## Important interpretation
 
 This component should be described as **machine-learning-based historical pattern ranking** rather than as a prediction of teacher satisfaction or an autonomous timetable generator. The system's final schedule remains under Program Head review.
+
+## AI Schedule Generator flow
+
+`ai_generator.py` uses the ranker as the placement engine for full timetable
+generation:
+
+```text
+Program Head inputs: Sections + Courses + Instructors
+        |
+        v
+Expand each course into lecture/lab blocks per section
+        |
+        v
+Enumerate hard-constraint-valid placements
+   (room/instructor/section clash, room type, non-preferred window, qualification)
+        |
+        v
+Score placements with the Random Forest historical-pattern ranker
+   (ml_scheduler.build_scorer: trained once, scored many times)
+        |
+        v
+Place best candidate with limited backtracking
+        |
+        v
+Save as Draft -> review/edit -> Publish
+```
+
+### Cold-start fallback
+
+With little or no published history the Random Forest cannot be trained. In that
+case the generator uses a deterministic heuristic instead (earliest day/time,
+balanced instructor and room load, and preference for compact section
+schedules). The hard-constraint engine always runs first, so ML and the fallback
+can never produce an invalid schedule. As more schedules are published, the ML
+placement layer becomes active automatically.
+
+### Hard vs. soft rules
+
+- **Hard (never violated):** room, instructor and section clashes; laboratory
+  sessions in Computer Labs and lectures in Lecture Rooms; instructor
+  non-preferred day/time windows; instructor course qualification.
+- **Soft (learned preference):** the historical-pattern ML score, which favours
+  days, times, rooms and instructors that resemble previously published
+  schedules.
+

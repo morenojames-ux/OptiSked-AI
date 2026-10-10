@@ -1,16 +1,63 @@
-# OptiSked AI — Program-Isolated Scheduling Update
+# OptiSked AI — AI Auto-Schedule Generator
 
-This build updates the Schedule Builder so Program Heads can:
+OptiSked AI now builds the timetable for you. Instead of entering each class
+manually, a Program Head configures three inputs and lets the AI place every
+session:
 
-- select a teacher from registered accounts whose role is **Teacher**;
-- no longer enter a teacher username manually;
-- choose a teaching duration of **1, 1.5, 2, 2.5, 3, 3.5, or 4 hours**;
-- select a start time and have the end time calculated automatically;
-- keep the selected duration when using an AI **Apply Fix** suggestion;
-- continue using conflict detection for teacher, room, section, availability, and approved leave;
-- save the schedule with the selected Teacher account's canonical name and username internally.
+- **Sections** — the class sections per year level (for example Year 1: A, B).
+- **Courses** — course code, name, year level, sessions per week, session
+  duration, and an optional **laboratory** with a meeting pattern.
+- **Instructors** — pick from the registered **Teacher accounts** (a dropdown;
+  free typing is no longer used), confirm the course codes they can teach, and
+  set any **non-preferred day/time windows** the AI must avoid. The course codes
+  auto-fill from the teacher's saved profile and previously assigned classes,
+  and are saved back to the profile for next time. Teachers already added here
+  are hidden from the dropdown.
 
-The supplied OptiSked AI logo is included at `static/optisked-logo.jpg`.
+## Laboratory meeting patterns
+
+When a course has a laboratory, exactly one pattern is chosen:
+
+| Pattern | Weekly meetings | Room types |
+|---|---|---|
+| Whole session is Laboratory | 1 lab | Computer Lab |
+| Half lecture, half laboratory | 1 day: lecture + lab back-to-back | Lecture Room, then Computer Lab |
+| Meets twice a week (both Laboratory) | 2 labs | Computer Lab |
+| Meets twice a week (Lab and Lecture) | 1 lab + 1 lecture | Computer Lab, Lecture Room |
+
+## How the AI builds the schedule
+
+1. Each course is expanded into weekly lecture/lab **blocks** for every section.
+2. Hard constraints are applied: no room, instructor or section clashes; labs
+   only in Computer Labs; lectures only in Lecture Rooms; instructors never
+   placed inside a non-preferred window; and instructors only teaching courses
+   they are qualified for.
+3. Feasible placements are scored by the machine-learning historical-pattern
+   ranker (Scikit-learn Random Forest). With little history, a deterministic
+   fallback is used so a schedule is always produced.
+4. Blocks are placed with limited backtracking. Sessions that cannot be placed
+   are reported instead of being forced into an invalid schedule.
+5. Results are saved as **Draft** sessions for review, with inline editing.
+   Publish individually or all at once; publishing generates access codes.
+
+The existing Program Head, Teacher, and Student portals, attendance, leave, and
+code-generation workflows continue to work on published schedules.
+
+## Calendar Editor (drag-and-drop)
+
+The **Calendar Editor** page (program-head sidebar) shows a Google-Calendar-style
+weekly grid per section. Pick a Year + Section, then **drag** any draft or
+published session to a new day and time. Dragging changes only the day and time
+(the duration and everything else stay the same).
+
+- Validation matches the AI's hard rules: instructor, room and section clashes,
+  laboratory-vs-lecture room type, the 07:30–21:00 window, and instructor
+  non-preferred windows. A rejected move snaps back and explains why.
+- Access codes do not encode the day/time, so moving a session does not
+  invalidate them.
+- Moving a **published** session asks for confirmation first.
+- The table view on the AI Schedule Generator page is still available for
+  editing the instructor or room.
 
 ## Run locally
 

@@ -103,6 +103,18 @@ def feature_dict(candidate: dict, schedules: List[dict], teacher_profile=None, f
         and end <= _safe_minutes(available_until)
     ) else 0
 
+    # Session type / room-type agreement tells the ranker whether a lab
+    # session is being placed in a computer laboratory and whether a lecture
+    # is placed in a lecture room.
+    session_type = str(candidate.get("session_type", "") or "")
+    room_kind = _room_type(room)
+    if session_type == "Lab":
+        room_matches_type = 1 if room_kind == "computer_lab" else 0
+    elif session_type == "Lecture":
+        room_matches_type = 1 if room_kind == "lecture_room" else 0
+    else:
+        room_matches_type = 1
+
     # Use categorical strings for meaningful one-hot encoding and a few numeric
     # scheduling-pattern features.
     return {
@@ -110,7 +122,7 @@ def feature_dict(candidate: dict, schedules: List[dict], teacher_profile=None, f
         "program": str(candidate.get("program", "")),
         "year_level": str(candidate.get("year_level", "")),
         "section": str(candidate.get("section", "")),
-        "room_type": _room_type(room),
+        "room_type": room_kind,
         "teacher": teacher_name.lower(),
         "room": room,
         "day_num": _day_num(day),
@@ -118,6 +130,10 @@ def feature_dict(candidate: dict, schedules: List[dict], teacher_profile=None, f
         "duration_minutes": duration,
         "preferred_match": preferred_match,
         "within_availability": within_availability,
+        "session_type": session_type,
+        "room_matches_type": room_matches_type,
+        "instructor_load": int(candidate.get("_instructor_load", 0) or 0),
+        "nonpreferred_overlap": int(candidate.get("_nonpreferred_overlap", 0) or 0),
         "day_frequency": day_freq.get(day, 0),
         "room_frequency": room_freq.get(room, 0),
         "start_frequency": start_freq.get(start, 0),
@@ -315,3 +331,89 @@ def train_and_rank(candidates: List[dict], schedules: Iterable[dict], teachers: 
         "training_samples": len(X_dicts),
         "message": "ML ranking is active. Recommendations are ranked from historically published scheduling patterns.",
     }
+
+
+def build_scorer(schedules: Iterable[dict], teachers: Iterable[dict] = ()):
+    """Train the historical-pattern ranker once and return a scoring callable.
+
+    The AI schedule generator evaluates thousands of candidate placements.
+    Retraining the Random Forest for each one would be wasteful, so this helper
+    fits the model a single time and returns:
+
+        (score_fn, meta)
+
+    where ``score_fn(candidates)`` returns the same candidate dicts annotated
+    with ``ml_probability`` (0-100). When the model cannot be trained (no
+    history or scikit-learn unavailable) it returns ``(None, meta)`` so the
+    caller can fall back to a deterministic heuristic.
+    """
+    schedules = [dict(s) for s in schedules]
+    teachers = [dict(t) for t in teachers]
+
+    meta = {
+        "active": False,
+        "algorithm": "Random Forest Classifier",
+        "training_schedules": len(schedules),
+        "training_samples": 0,
+        "message": "",
+    }
+
+    try:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.feature_extraction import DictVectorizer
+    except Exception as exc:
+        meta["message"] = f"Scikit-learn is unavailable: {exc}"
+        return None, meta
+
+    teachers_by_id = {str(t.get("id")): t for t in teachers if t.get("id") is not None}
+    teachers_by_name = {str(t.get("full_name", "")).strip().lower(): t for t in teachers}
+    teachers_by_username = {str(t.get("username", "")).strip().lower(): t for t in teachers}
+    freq = _frequency_maps(schedules)
+
+    X_dicts = []
+    y = []
+    for s in schedules:
+        profile = _teacher_profile(s, teachers_by_id, teachers_by_name, teachers_by_username)
+        X_dicts.append(feature_dict(s, schedules, profile, freq))
+        y.append(1)
+        for n in _alternative_negatives(s, schedules):
+            profile = _teacher_profile(n, teachers_by_id, teachers_by_name, teachers_by_username)
+            X_dicts.append(feature_dict(n, schedules, profile, freq))
+            y.append(0)
+
+    meta["training_samples"] = len(X_dicts)
+    if not X_dicts or len(set(y)) < 2:
+        meta["message"] = "More published scheduling examples are needed to train the ML ranker."
+        return None, meta
+
+    vectorizer = DictVectorizer(sparse=False)
+    X = vectorizer.fit_transform(X_dicts)
+    model = RandomForestClassifier(
+        n_estimators=120,
+        max_depth=8,
+        random_state=42,
+        class_weight="balanced",
+    )
+    model.fit(X, y)
+
+    def score_fn(candidates):
+        if not candidates:
+            return []
+        features = []
+        for candidate in candidates:
+            profile = _teacher_profile(candidate, teachers_by_id, teachers_by_name, teachers_by_username)
+            features.append(feature_dict(candidate, schedules, profile, freq))
+        matrix = vectorizer.transform(features)
+        probabilities = model.predict_proba(matrix)
+        scored = []
+        for candidate, row in zip(candidates, probabilities):
+            item = dict(candidate)
+            item["ml_probability"] = round(float(row[1]) * 100)
+            scored.append(item)
+        return scored
+
+    meta.update({
+        "active": True,
+        "message": "ML placement is active. Sessions are ranked from historically published scheduling patterns.",
+    })
+    return score_fn, meta

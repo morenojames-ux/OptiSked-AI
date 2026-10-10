@@ -2,161 +2,143 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <h1>Schedule Builder</h1>
-    <p>Managing <strong>{{ session.get('program') }}</strong>. Your schedule view is separated by program, while conflict checking scans schedules from every program.</p>
+    <h1>AI Schedule Generator</h1>
+    <p>Managing <strong>{{ session.get('program') }}</strong>. Configure sections, courses and instructors, then let OptiSked build the timetable.</p>
   </div>
-  <a class="primary-button" href="{{ url_for('dashboard', add=1) }}"><i class="fa-solid fa-plus"></i> Add Schedule</a>
+  <div class="header-actions">
+    <form method="post" action="{{ url_for('ai_generate') }}">
+      <button class="primary-button" type="submit" {% if not courses or not sections or not instructors %}disabled title="Add sections, courses and instructors first"{% endif %}>
+        <i class="fa-solid fa-wand-magic-sparkles"></i> Generate AI Schedule
+      </button>
+    </form>
+    <a class="secondary-button" href="{{ url_for('calendar_editor') }}"><i class="fa-solid fa-calendar-days"></i> Calendar Editor</a>
+    {% if draft_count %}
+    <form method="post" action="{{ url_for('publish_all_drafts') }}"><button class="secondary-button" type="submit"><i class="fa-solid fa-cloud-arrow-up"></i> Publish All ({{ draft_count }})</button></form>
+    <form method="post" action="{{ url_for('clear_drafts') }}" onsubmit="return confirm('Discard all draft sessions?')"><button class="secondary-button" type="submit"><i class="fa-solid fa-eraser"></i> Clear Drafts</button></form>
+    {% endif %}
+  </div>
 </div>
 
-<div class="info-banner"><i class="fa-solid fa-circle-info"></i><div><strong>Program-isolated management.</strong> You only see and manage schedules for <strong>{{ session.get('program') }}</strong>. OptiSked still checks teacher, room, section, availability, and leave conflicts across <strong>all programs</strong>.</div></div>
+<div class="info-banner"><i class="fa-solid fa-circle-info"></i><div><strong>How generation works.</strong> Every course is expanded into weekly meetings per section. The AI scores placements using historical scheduling patterns (machine learning) and enforces hard rules: no room, instructor or section clashes, labs only in Computer Labs, lectures only in Lecture Rooms, and no instructor inside a non-preferred window. Results are saved as <strong>drafts</strong> for your review.</div></div>
 
-{% if show_form %}
-<section class="card form-card" id="schedule-form">
-  <div class="card-title-row">
-    <div>
-      <h2>New Schedule Entry</h2>
-      <p>Select a Teacher account, subject, year level, section, room, and teaching duration.</p>
-    </div>
-    <a class="icon-button" href="{{ url_for('dashboard') }}" aria-label="Close"><i class="fa-solid fa-xmark"></i></a>
-  </div>
-
-  {% if conflict_messages %}
-  <div class="conflict-panel">
-    <h3><i class="fa-solid fa-triangle-exclamation"></i> Schedule Conflict Detected</h3>
-    <ul>{% for message in conflict_messages %}<li>{{ message }}</li>{% endfor %}</ul>
-  </div>
-  {% endif %}
-
-  {% if ai_suggestions %}
-  <div class="ai-panel">
-    <div class="ai-heading">
-      <div>
-        <span class="ai-badge"><i class="fa-solid fa-wand-magic-sparkles"></i> AI + MACHINE LEARNING</span>
-        <h3>Suggested fixes</h3>
-        <p>Hard constraints are checked first across every program, then feasible alternatives are ranked using historical scheduling patterns.</p>
-        {% if ai_model_info and ai_model_info.active %}
-        <small class="ml-status-line"><i class="fa-solid fa-brain"></i> {{ ai_model_info.algorithm }} active • trained from {{ ai_model_info.training_schedules }} published schedule{{ '' if ai_model_info.training_schedules == 1 else 's' }}</small>
-        {% elif ai_model_info %}
-        <small class="ml-status-line"><i class="fa-solid fa-circle-info"></i> {{ ai_model_info.algorithm }} will activate when scheduling history is available.</small>
-        {% endif %}
-      </div>
-    </div>
-    {% for s in ai_suggestions %}
-    <div class="suggestion">
-      <div>
-        <strong>{{ s.title }}</strong>
-        <small>{{ s.reason }}</small>
-        {% if s.ml_score is defined %}<span class="ml-score">ML suitability: {{ s.ml_score }}%</span>{% endif %}
-      </div>
-      <button type="button" class="secondary-button" onclick="applyFormFix('{{ s.day }}','{{ s.start_time }}','{{ s.end_time }}','{{ s.room|replace("'", "\'") }}')">Apply Fix</button>
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  <form method="post" action="{{ url_for('add_schedule') }}" id="scheduleForm">
-    <input type="hidden" name="teacher_name" id="teacherNameHidden" value="{{ form.get('teacher_name','') }}">
-    <div class="form-grid two">
-      <label>Teacher Account
-        <select name="teacher_id" id="teacherSelect" required onchange="syncTeacherProfile()">
-          <option value="">Select a teacher account</option>
-          {% for t in teachers %}<option value="{{ t.id }}" data-name="{{ t.full_name }}" data-preferred-days="{{ t.preferred_days or '' }}" data-available-from="{{ t.available_from or '' }}" data-available-until="{{ t.available_until or '' }}" {% if form.get('teacher_id','')|string == t.id|string %}selected{% endif %}>{{ t.full_name }}</option>{% endfor %}
-        </select>
-        <small class="field-help" id="teacherProfileHelp">Choose a teacher. Their saved preferred teaching days and availability will be loaded automatically.</small>
-      </label>
-      <label>Subject Code<input name="subject_code" value="{{ form.get('subject_code','') }}" placeholder="e.g. CC 101" required></label>
-      <label>Subject Name<input name="subject_name" value="{{ form.get('subject_name','') }}" placeholder="e.g. Programming 1" required></label>
-      <label>Program
-        <input value="{{ session.get('program') }}" readonly>
-        <input type="hidden" name="program" value="{{ session.get('program') }}">
-        <small class="field-help">Automatically set to your assigned program.</small>
-      </label>
-      <label>Year Level
-        <select name="year_level" required>{% for y in year_levels %}<option value="{{ y }}" {% if form.get('year_level','Year 1')==y %}selected{% endif %}>{{ y }}</option>{% endfor %}</select>
-        <small class="field-help">Used to organize teachers, students, and subjects by year level.</small>
-      </label>
-      <label>Section<input name="section" value="{{ form.get('section','') }}" placeholder="e.g. A" required></label>
-      <label>Room Assignment
-        <select name="room" required><option value="">Select Room</option>{% for r in rooms %}<option value="{{ r }}" {% if form.get('room')==r %}selected{% endif %}>{{ r }}</option>{% endfor %}</select>
-      </label>
-    </div>
-
-    <div class="subsection"><h3>Preferred Days to Teach</h3><p>Select all days the selected teacher can teach.</p>
-      <div class="day-pills">{% for d in days %}<label><input type="checkbox" name="preferred_days" value="{{ d }}" {% if d in form.get('preferred_days','').split(',') %}checked{% endif %}><span>{{ d }}</span></label>{% endfor %}</div>
-    </div>
-
-    <div class="form-grid two">
-      <label>Available From<input type="time" name="available_from" value="{{ form.get('available_from','07:30') }}" required></label>
-      <label>Available Until<input type="time" name="available_until" value="{{ form.get('available_until','17:00') }}" required></label>
-    </div>
-
-    <div class="slot-box"><div class="slot-heading"><div><h3>Schedule Slot</h3><p>End time is calculated automatically from the selected teaching duration.</p></div></div>
-      <div class="form-grid four">
-        <label>Day<select name="day" id="daySelect" required>{% for d in days %}<option value="{{ d }}" {% if form.get('day','Mon')==d %}selected{% endif %}>{{ d }}</option>{% endfor %}</select></label>
-        <label>Start Time<input type="time" name="start_time" id="startTimeInput" value="{{ form.get('start_time','07:30') }}" required></label>
-        <label>Teaching Duration<select name="duration_hours" id="durationSelect" required>{% for d in duration_options %}<option value="{{ d }}" {% if form.get('duration_hours','1.5')==d %}selected{% endif %}>{{ d }} {% if d=='1' %}Hour{% else %}Hours{% endif %}</option>{% endfor %}</select></label>
-        <label>End Time<input type="time" name="end_time" id="endTimeInput" value="{{ form.get('end_time','09:00') }}" readonly></label>
-      </div>
-      <div class="duration-note"><i class="fa-solid fa-circle-info"></i> Available teaching durations: 1, 1.5, 2, 2.5, 3, 3.5, or 4 hours.</div>
-    </div>
-
-    <div class="form-actions"><a class="secondary-button" href="{{ url_for('dashboard') }}">Cancel</a><button class="primary-button" type="submit"><i class="fa-solid fa-calendar-check"></i> Generate Schedule</button></div>
-  </form>
+<section class="config-summary">
+  <a class="config-tile" href="{{ url_for('sections_page') }}">
+    <i class="fa-solid fa-layer-group"></i>
+    <div><strong>{{ sections|length }}</strong><span>Sections</span></div>
+  </a>
+  <a class="config-tile" href="{{ url_for('courses_page') }}">
+    <i class="fa-solid fa-book"></i>
+    <div><strong>{{ courses|length }}</strong><span>Courses</span></div>
+  </a>
+  <a class="config-tile" href="{{ url_for('instructors_page') }}">
+    <i class="fa-solid fa-chalkboard-user"></i>
+    <div><strong>{{ instructors|length }}</strong><span>Instructors</span></div>
+  </a>
 </section>
+
+{% if not sections or not courses or not instructors %}
+<div class="conflict-panel">
+  <h3><i class="fa-solid fa-triangle-exclamation"></i> Setup incomplete</h3>
+  <ul>
+    {% if not sections %}<li>Add at least one <a href="{{ url_for('sections_page') }}">section</a>.</li>{% endif %}
+    {% if not courses %}<li>Add at least one <a href="{{ url_for('courses_page') }}">course</a>.</li>{% endif %}
+    {% if not instructors %}<li>Add at least one <a href="{{ url_for('instructors_page') }}">instructor</a> with qualified course codes.</li>{% endif %}
+  </ul>
+</div>
 {% endif %}
 
-<section class="card year-overview"><div class="section-title"><div><h2>Year-Level Overview</h2><p>Schedules are organized by year level so it is easier to track which teacher handles each subject and how many students are enrolled.</p></div></div>
-{% for group in year_groups %}
-  <div class="year-group"><div class="year-group-header"><div><h3>{{ group.year_level }}</h3><span>{{ group['items']|length }} {{ 'subject' if group['items']|length == 1 else 'subjects' }}</span></div></div>
-  {% if group['items'] %}<div class="table-wrap"><table><thead><tr><th>Section</th><th>Teacher</th><th>Subject</th><th>Day</th><th>Time</th><th>Room</th><th>Students</th><th>Action</th></tr></thead><tbody>
-    {% for item in group['items'] %}<tr><td>{{ item.section }}</td><td><strong>{{ item.teacher_name }}</strong></td><td><strong>{{ item.subject_code }}</strong><br>{{ item.subject_name }}</td><td>{{ item.day }}</td><td>{{ item.formatted_time }}</td><td>{{ item.room }}</td><td><span class="student-count">{{ item.student_count }}</span></td><td><form method="post" action="{{ url_for('delete_schedule', schedule_id=item.id) }}" onsubmit="return confirm('Delete this schedule and its access codes?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form></td></tr>{% endfor %}
-  </tbody></table></div>{% else %}<div class="empty-inline">No schedules for {{ group.year_level }} yet.</div>{% endif %}
+{% if ai_model_info %}
+<div class="ai-panel">
+  <div class="ai-heading">
+    <div>
+      <span class="ai-badge"><i class="fa-solid fa-brain"></i> MACHINE LEARNING</span>
+      <h3>{{ ai_model_info.algorithm }}</h3>
+      <p>{{ ai_model_info.message }}</p>
+      <small class="ml-status-line"><i class="fa-solid {{ 'fa-circle-check' if ai_model_info.active else 'fa-circle-info' }}"></i>
+        {{ 'ML placement active' if ai_model_info.active else 'Deterministic fallback active' }} • {{ ai_model_info.training_schedules }} published schedule{{ '' if ai_model_info.training_schedules == 1 else 's' }} available for training.</small>
+    </div>
   </div>
-{% endfor %}
+</div>
+{% endif %}
+
+{% if report %}
+<div class="ai-panel">
+  <div class="ai-heading">
+    <div>
+      <span class="ai-badge"><i class="fa-solid fa-robot"></i> GENERATION REPORT</span>
+      <h3>{{ report.message }}</h3>
+      {% if report.ml %}<small class="ml-status-line"><i class="fa-solid fa-brain"></i> {{ report.ml.message }}</small>{% endif %}
+    </div>
+  </div>
+  {% if report.unplaced %}
+  <div class="conflict-panel">
+    <h3><i class="fa-solid fa-triangle-exclamation"></i> Sessions that could not be placed</h3>
+    <ul>{% for u in report.unplaced %}<li><strong>{{ u.course_code }}</strong> — {{ u.course_name }} ({{ u.year_level }} · Section {{ u.section }})<br><small>{{ u.reason }}</small></li>{% endfor %}</ul>
+  </div>
+  {% else %}
+  <div class="suggestion"><div><strong>All sessions placed successfully.</strong><small>Review the drafts below, edit if needed, then publish.</small></div></div>
+  {% endif %}
+</div>
+{% endif %}
+
+<section class="card year-overview">
+  <div class="section-title"><div><h2>Schedule</h2><p>Draft sessions can be edited or published. Published sessions are final and generate access codes.</p></div></div>
+  {% set has_any = [] %}
+  {% for group in year_groups %}{% if group['items'] %}{% set _ = has_any.append(1) %}{% endif %}{% endfor %}
+  {% if has_any %}
+    {% for group in year_groups %}
+      {% if group['items'] %}
+      <div class="year-group">
+        <div class="year-group-header"><div><h3>{{ group.year_level }}</h3><span>{{ group['items']|length }} {{ 'session' if group['items']|length == 1 else 'sessions' }}</span></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Section</th><th>Instructor</th><th>Subject</th><th>Type</th><th>Day</th><th>Time</th><th>Room</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+          {% for item in group['items'] %}
+          <tr>
+            <td>{{ item.section }}</td>
+            <td><strong>{{ item.teacher_name }}</strong></td>
+            <td><strong>{{ item.subject_code }}</strong><br>{{ item.subject_name }}</td>
+            <td><span class="status {{ 'lab-tag' if item.session_type == 'Lab' else 'plain-tag' }}">{{ item.session_type }}</span></td>
+            <td>{{ item.day }}</td>
+            <td>{{ item.formatted_time }}</td>
+            <td>{{ item.room }}</td>
+            <td><span class="status {{ 'draft-tag' if item.status == 'Draft' else 'published-tag' }}">{{ item.status }}</span></td>
+            <td class="row-actions">
+              {% if item.status == 'Draft' %}
+              <button class="secondary-button small" type="button" onclick="toggleEdit({{ item.id }})"><i class="fa-solid fa-pen"></i> Edit</button>
+              <form method="post" action="{{ url_for('publish_schedule', schedule_id=item.id) }}"><button class="primary-small" type="submit">Publish</button></form>
+              {% endif %}
+              <form method="post" action="{{ url_for('delete_schedule', schedule_id=item.id) }}" onsubmit="return confirm('Delete this session?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form>
+            </td>
+          </tr>
+          {% if item.status == 'Draft' %}
+          <tr class="edit-row" id="edit-{{ item.id }}" style="display:none">
+            <td colspan="9">
+              <form class="edit-slot-form" method="post" action="{{ url_for('edit_generated_schedule', schedule_id=item.id) }}">
+                <div class="form-grid four">
+                  <label>Instructor<input name="teacher_name" value="{{ item.teacher_name }}"></label>
+                  <label>Day<select name="day">{% for d in days %}<option value="{{ d }}" {% if item.day == d %}selected{% endif %}>{{ d }}</option>{% endfor %}</select></label>
+                  <label>Start Time<input type="time" name="start_time" value="{{ item.start_time }}"></label>
+                  <label>End Time<input type="time" name="end_time" value="{{ item.end_time }}"></label>
+                  <label>Room<select name="room"><option value="">Select Room</option>{% for r in rooms %}<option value="{{ r }}" {% if item.room == r %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></label>
+                </div>
+                <div class="form-actions"><button class="primary-button small" type="submit"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button><button class="secondary-button small" type="button" onclick="toggleEdit({{ item.id }})">Cancel</button></div>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody></table></div>
+      </div>
+      {% endif %}
+    {% endfor %}
+  {% else %}
+  <div class="empty-inline">No schedule yet. Configure your inputs and click <strong>Generate AI Schedule</strong>.</div>
+  {% endif %}
 </section>
 
 <script>
-function syncTeacherProfile(){
-  const select=document.getElementById('teacherSelect');
-  const hidden=document.getElementById('teacherNameHidden');
-  const option=select && select.options[select.selectedIndex];
-  const help=document.getElementById('teacherProfileHelp');
-  if(!option || !option.value){
-    if(hidden) hidden.value='';
-    return;
-  }
-
-  if(hidden) hidden.value=option.dataset.name || '';
-
-  // Load the teacher's saved profile settings into the form.
-  const preferred=(option.dataset.preferredDays || '')
-    .split(',')
-    .map(v=>v.trim())
-    .filter(Boolean);
-
-  document.querySelectorAll('input[name="preferred_days"]').forEach(cb=>{
-    cb.checked=preferred.includes(cb.value);
-  });
-
-  const from=document.querySelector('input[name="available_from"]');
-  const until=document.querySelector('input[name="available_until"]');
-  if(from && option.dataset.availableFrom) from.value=option.dataset.availableFrom;
-  if(until && option.dataset.availableUntil) until.value=option.dataset.availableUntil;
-
-  // Keep the schedule-day selector aligned with the selected teacher.
-  const daySelect=document.getElementById('daySelect');
-  if(daySelect && preferred.length && !preferred.includes(daySelect.value)){
-    const firstAllowed=[...daySelect.options].find(o=>preferred.includes(o.value));
-    if(firstAllowed) daySelect.value=firstAllowed.value;
-  }
-
-  if(help){
-    const daysLabel=preferred.length ? preferred.join(', ') : 'none saved';
-    help.textContent=`${option.dataset.name || 'Teacher'} profile loaded — preferred days: ${daysLabel}. Availability: ${(option.dataset.availableFrom || '—')} to ${(option.dataset.availableUntil || '—')}.`;
-  }
+function toggleEdit(id){
+  const row=document.getElementById('edit-'+id);
+  if(row) row.style.display = row.style.display==='none' ? 'table-row' : 'none';
 }
-function updateEndTime(){const start=document.getElementById('startTimeInput'),duration=document.getElementById('durationSelect'),end=document.getElementById('endTimeInput');if(!start||!duration||!end||!start.value)return;const [h,m]=start.value.split(':').map(Number);const total=h*60+m+Math.round(parseFloat(duration.value)*60);if(total>1439){end.value='';return;}end.value=String(Math.floor(total/60)).padStart(2,'0')+':'+String(total%60).padStart(2,'0');}
-function applyFormFix(day,start,end,room){const d=document.getElementById('daySelect'),s=document.getElementById('startTimeInput'),e=document.getElementById('endTimeInput');if(d)d.value=day;if(s)s.value=start;if(e)e.value=end;const roomSelect=document.querySelector('select[name="room"]');if(roomSelect)roomSelect.value=room;updateEndTime();const box=document.getElementById('schedule-form');if(box)box.scrollIntoView({behavior:'smooth',block:'start'});}
-document.addEventListener('DOMContentLoaded',()=>{syncTeacherProfile();updateEndTime();const s=document.getElementById('startTimeInput'),d=document.getElementById('durationSelect');if(s)s.addEventListener('input',updateEndTime);if(d)d.addEventListener('change',updateEndTime);});
 </script>
 {% endblock %}

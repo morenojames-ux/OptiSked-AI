@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Calendar Editor</h1>
+    <p>Drag draft or published sessions to a new day and time. <a href="{{ url_for('dashboard') }}"><i class="fa-solid fa-table-list"></i> Back to table view</a>.</p>
+  </div>
+  <div class="header-actions">
+    <label class="cal-section-pick">Section
+      <select id="calSectionSelect"></select>
+    </label>
+  </div>
+</div>
+
+<div class="info-banner"><i class="fa-solid fa-circle-info"></i><div><strong>Drag to reschedule.</strong> Moving a session only changes its day and time. Instructor, room and section clashes, laboratory-vs-lecture room type, and non-preferred windows are checked when you drop it; a rejected move snaps back and explains why.</div></div>
+
+<div class="cal-legend">
+  <span><i class="cal-dot draft"></i> Draft</span>
+  <span><i class="cal-dot published"></i> Published</span>
+  <span><i class="cal-dot lab"></i> Laboratory</span>
+</div>
+
+<div id="calMessage" class="cal-msg" style="display:none"></div>
+
+{% if sections %}
+<div class="calendar-shell" id="calendarShell">
+  <div class="cal-grid" id="calGrid"></div>
+</div>
+<div id="calDetail" class="cal-detail" style="display:none"></div>
+{% else %}
+<div class="empty-inline">Add at least one section before using the calendar editor.</div>
+{% endif %}
+
+<script type="application/json" id="cal-sections">{{ sections|tojson }}</script>
+<script type="application/json" id="cal-events">{{ events|tojson }}</script>
+<script type="application/json" id="cal-grid">{{ grid|tojson }}</script>
+<script src="{{ url_for('static', filename='calendar.js') }}"></script>
+{% endblock %}

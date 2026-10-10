@@ -1,4 +1,56 @@
 
+## Added — Calendar Editor (drag-and-drop rescheduling)
+
+- New **Calendar Editor** page in the Program Head sidebar with a
+  Google-Calendar-style weekly grid per section (Mon–Sat, 07:30–21:00, 30-minute
+  snap).
+- Draft **and** published sessions can be dragged to a new day/time; duration is
+  preserved and each meeting moves independently. Moving a published session
+  asks for confirmation.
+- Moves are validated server-side by the same hard rules as the AI generator
+  (clash, room type, time window, non-preferred windows). Rejected moves snap
+  back and show the reason.
+- `conflicts_for()` gained an `include_availability` flag; `generated_slot_errors()`
+  now skips teacher availability hours/preferred days so manual edits match how
+  the AI placed sessions (fixes classes scheduled after 17:00 being wrongly
+  rejected on edit).
+- New JSON endpoint `POST /schedule/<id>/move`; new `/calendar` route;
+  `static/calendar.js` (vanilla drag/drop); calendar styles in `static/style.css`.
+- Access codes are unaffected by day/time changes, so no re-sync is needed.
+
+
+## Changed — Instructor selection uses registered teacher accounts
+
+- The Program Head's **Instructors** page now lists a dropdown of registered
+  Teacher accounts instead of a free-text name field.
+- Teachers already assigned in the program are hidden from the dropdown to
+  prevent duplicates.
+- Selecting a teacher auto-fills the "courses they can teach" from that
+  account's saved profile (`teachers.subject_qualification`) plus their
+  previously assigned subject codes; the merged result is saved back to the
+  profile on submit.
+- Added `instructors.user_id` linking each instructor to the teacher account,
+  with a best-effort backfill for existing rows (migration
+  `004_instructor_teacher_link.sql`).
+- AI-generated schedules now link `teacher_id`/`username` via the instructor's
+  account, falling back to the previous name match for legacy rows.
+
+
+## Added — AI Schedule Generator (fully automated scheduling)
+
+- Replaced manual single-schedule entry with an automated generator driven by three inputs:
+  - **Sections** per year level.
+  - **Courses** (code, name, year level, sessions per week, duration, optional laboratory pattern).
+  - **Instructors** (name, qualified course codes, and non-preferred day/time windows).
+- Added `ai_generator.py`: expands courses into weekly lecture/lab blocks, enumerates hard-constraint-valid placements, scores them with the ML historical-pattern ranker, places them with limited backtracking, and reports any sessions it could not place.
+- Laboratory patterns are mutually exclusive radio choices: whole session lab, half lecture/half lab, meets twice (both lab), meets twice (lab and lecture).
+- Hard constraints enforced: no room/instructor/section clashes, labs only in Computer Labs, lectures only in Lecture Rooms, instructor non-preferred day/time windows, and course qualification.
+- Generated schedules are saved as **Draft** for review, with inline editing and validation, then published individually or all at once (publishing generates access codes).
+- `ml_scheduler.py`: added `build_scorer()` (train once, score many) and new features (`session_type`, room-type agreement, instructor load, non-preferred overlap).
+- Added migration `003_ai_schedule_generator.sql` and new tables: `program_sections`, `courses`, `instructors`, `instructor_unavailability`, `instructor_qualifications`; new `schedules` columns `session_type`, `course_id`, `is_generated`.
+- Program Head navigation now includes AI Schedule Generator, Sections, Courses, and Instructors.
+
+
 ## Added — Machine Learning Scheduling Recommendations
 
 - Added `ml_scheduler.py` with a Scikit-learn Random Forest Classifier.

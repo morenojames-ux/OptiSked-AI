@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Sections</h1>
+    <p>Define the class sections for each year level in <strong>{{ session.get('program') }}</strong>. The AI assigns every course to each configured section.</p>
+  </div>
+</div>
+
+<div class="info-banner"><i class="fa-solid fa-circle-info"></i><div><strong>How sections are used.</strong> Each course for a year level is scheduled once per section. A section can never have two classes at the same time.</div></div>
+
+<section class="card form-card">
+  <div class="card-title-row"><div><h2>Add a Section</h2><p>Examples: A, B, C or 1A, 1B.</p></div></div>
+  <form method="post" action="{{ url_for('sections_page') }}">
+    <div class="form-grid two">
+      <label>Year Level
+        <select name="year_level" required>{% for y in year_levels %}<option value="{{ y }}">{{ y }}</option>{% endfor %}</select>
+      </label>
+      <label>Section Name<input name="section_name" placeholder="e.g. A" required></label>
+    </div>
+    <div class="form-actions"><button class="primary-button" type="submit"><i class="fa-solid fa-plus"></i> Add Section</button></div>
+  </form>
+</section>
+
+<section class="card year-overview">
+  <div class="section-title"><div><h2>Sections by Year Level</h2><p>These are the sections the AI scheduler will populate.</p></div></div>
+  {% for group in year_groups %}
+  <div class="year-group">
+    <div class="year-group-header"><div><h3>{{ group.year_level }}</h3><span>{{ group['items']|length }} {{ 'section' if group['items']|length == 1 else 'sections' }}</span></div></div>
+    {% if group['items'] %}
+    <div class="table-wrap"><table><thead><tr><th>Section</th><th>Action</th></tr></thead><tbody>
+      {% for item in group['items'] %}
+      <tr>
+        <td><strong>Section {{ item.section_name }}</strong></td>
+        <td><form method="post" action="{{ url_for('delete_section', section_id=item.id) }}" onsubmit="return confirm('Remove this section?')"><button class="danger-icon" title="Delete"><i class="fa-solid fa-trash-can"></i></button></form></td>
+      </tr>
+      {% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="empty-inline">No sections for {{ group.year_level }} yet.</div>{% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}
